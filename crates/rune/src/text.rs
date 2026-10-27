@@ -677,8 +677,8 @@ impl TextHighlight {
     /// Bytes `range` of the text, painted with a rounded `bg` fill behind each line's glyphs.
     pub fn new(range: std::ops::Range<usize>, bg: Color) -> TextHighlight {
         TextHighlight {
-            start: range.start as u32,
-            end: range.end as u32,
+            start: range.start.min(u32::MAX as usize) as u32,
+            end: range.end.min(u32::MAX as usize) as u32,
             bg,
             fg: None,
             ring: None,
@@ -713,8 +713,8 @@ impl TextHighlight {
     }
     /// Returns this highlight with its UTF-8 byte range replaced by `range`.
     pub fn with_range(mut self, range: std::ops::Range<usize>) -> Self {
-        self.start = range.start as u32;
-        self.end = range.end as u32;
+        self.start = range.start.min(u32::MAX as usize) as u32;
+        self.end = range.end.min(u32::MAX as usize) as u32;
         self
     }
 }

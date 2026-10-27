@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- Markdown source highlights track multiline code spans inside quotes and lists exactly.
+  Highlight element reporting and scroll targeting avoid quadratic work for many matches;
+  oversized core highlight offsets no longer wrap. Bare URL autolinking accepts uppercase
+  HTTP schemes and leaves image alt text alone (bare email addresses remain plain text).
+
 - **Markdown source-byte highlights (`Markdown::highlights`, `Highlight`), strikethrough (`~~struck~~`), and bare-URL autolinking (`Markdown::autolink`).**
   `Markdown::highlights` accepts `(Range<usize>, Highlight)` pairs in source UTF-8 bytes and maps
   them to rendered text across inline formatting, headings, paragraphs, lists, task items, quotes,

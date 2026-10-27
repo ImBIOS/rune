@@ -366,19 +366,14 @@ impl<S: 'static> Runtime<S> {
                 continue;
             }
             let Some(spec) = n.text.as_ref().filter(|t| !t.highlights.is_empty()) else { continue };
-            let mut matched_any = false;
-            for (k, h) in spec.highlights.iter().enumerate() {
-                let Some(hkey) = h.key.as_deref() else { continue };
-                let path = format!("{}/{hkey}", n.path);
-                if crate::flight::selects(key, &path, Some(hkey)) {
-                    if !matched_any {
-                        matched_any = true;
+            let matches: Vec<_> = spec.highlights.iter().map(|h| h.key.as_deref().is_some_and(|hkey| {
+                crate::flight::selects(key, &format!("{}/{hkey}", n.path), Some(hkey))
+            })).collect();
+            if matches.iter().any(|m| *m) {
+                for (k, r) in self.highlight_boxes_in(nodes, i, n.target, 1.0) {
+                    if matches[k] {
                         first_node.get_or_insert(i);
-                    }
-                    for (j, r) in self.highlight_boxes_in(nodes, i, n.target, 1.0) {
-                        if j == k {
-                            union = Some(union.map_or(r, |u| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]));
-                        }
+                        union = Some(union.map_or(r, |u| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]));
                     }
                 }
             }
@@ -400,19 +395,26 @@ impl<S: 'static> Runtime<S> {
 
     /// Reports each text highlight as its own `"mark"` element after its text.
     pub(super) fn highlight_elements(&self, elements: &mut Vec<ElementInfo>) {
+        if !self.nodes.iter().any(|n| n.text.as_ref().is_some_and(|t| !t.highlights.is_empty())) { return; }
+        let text_elements: std::collections::HashMap<_, _> = elements.iter().enumerate().map(|(i, e)| (e.path.clone(), i)).collect();
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             let Some(spec) = n.text.as_ref().filter(|t| !t.highlights.is_empty()) else { continue };
-            let Some(at) = elements.iter().position(|e| e.path == n.path) else { continue };
+            let Some(&at) = text_elements.get(&n.path) else { continue };
             let text = elements[at].clone();
             let boxes = self.highlight_boxes(i, self.drawn_box(i));
             let targets = self.highlight_boxes(i, n.target);
-            let union = |k: usize, bs: &[(usize, [f32; 4])]| bs.iter().filter(|(j, _)| *j == k).fold(None, |u: Option<[f32; 4]>, (_, r)| {
-                Some(u.map_or(*r, |u| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]))
-            });
+            let unions = |bs: &[(usize, [f32; 4])]| {
+                let mut out = vec![None; spec.highlights.len()];
+                for &(k, r) in bs {
+                    out[k] = Some(out[k].map_or(r, |u: [f32; 4]| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]));
+                }
+                out
+            };
+            let (boxes, targets) = (unions(&boxes), unions(&targets));
             for (k, h) in spec.highlights.iter().enumerate() {
-                let Some(r) = union(k, &boxes) else { continue };
-                let t = union(k, &targets).unwrap_or(r);
+                let Some(r) = boxes[k] else { continue };
+                let t = targets[k].unwrap_or(r);
                 let v = text.visible;
                 let (x0, y0) = (r[0].max(v[0]), r[1].max(v[1]));
                 let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));

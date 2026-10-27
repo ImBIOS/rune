@@ -10,6 +10,7 @@
 //! - `scroll`: wheel frames at a fixed width, for comparison.
 //!
 //! `--memo` wraps the note in `rune::memo`, so a resize reuses its subtree instead of building it.
+//! `--only marks` times adding 2,000 source-range highlights and reading their element boxes.
 //!
 //! cargo build --profile perf -p rune-kit --example markdown_resize --features markdown,frame-profile
 //! target/perf/examples/markdown_resize [--sizes 5,50] [--only resize] [--step 1] [--memo]
@@ -22,17 +23,17 @@
 //! `nodes` layout nodes and `glyphs` glyph quads painted.
 use rune::text::TextSystem;
 use rune::{Color, Cx, El, Env, Runtime, ScrollSpec, col};
-use rune_kit::{Markdown, MarkdownStyle};
+use rune_kit::{Highlight, Markdown, MarkdownStyle};
 
 const HEIGHT: f32 = 900.0;
 const BG: Color = Color { r: 0.008, g: 0.008, b: 0.009, a: 1.0 };
 
-struct State { src: String, style: MarkdownStyle }
+struct State { src: String, style: MarkdownStyle, marks: Vec<(std::ops::Range<usize>, Highlight)> }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
-    let note = || Markdown::new(s.src.as_str()).render(&s.style);
-    // `--memo`: the note's subtree is memoized on its length, as an app would on a revision.
-    let note = if MEMO.get() { rune::memo("note", s.src.len(), note) } else { note() };
+    let note = || Markdown::new(s.src.as_str()).highlights(&s.marks).render(&s.style);
+    // `--memo`: an app would use a document/search revision here.
+    let note = if MEMO.get() { rune::memo("note", (s.src.len(), s.marks.len()), note) } else { note() };
     col().w_full().h_full().fill(BG).child(
         col().key("viewport").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false })
             .child(col().w_full().px(32.0).py(24.0).child(note)),
@@ -148,7 +149,7 @@ fn runtime(src: String, width: f32) -> Runtime<State> {
     let mut fonts = TextSystem::default();
     fonts.layout_rich("Warm fonts", &[], rune::TextStyle::new(15.0, 400.0), 2.0, None);
     for _ in 0..3 { fonts.end_commit(); }
-    let state = State { src, style: MarkdownStyle::neutral(true) };
+    let state = State { src, style: MarkdownStyle::neutral(true), marks: Vec::new() };
     let mut rt = Runtime::with_text(state, view, (width, HEIGHT), Env::new(true, 2.0), fonts);
     rt.frame(0.0);
     let mut n = 0;
@@ -172,12 +173,23 @@ fn main() {
         println!("NOTE size={kb}k bytes={} lines={} texts={} visible_texts={}", src.len(), src.lines().count(), texts.len(), texts.iter().filter(|v| **v).count());
         drop(rt);
 
+        if run("marks") {
+            let mut rt = runtime(src.clone(), 900.0);
+            let ranges: Vec<_> = src.char_indices().filter(|&(i, c)| c.is_ascii_alphabetic() && (i == 0 || src.as_bytes()[i - 1].is_ascii_whitespace()))
+                .take(2000).map(|(i, _)| (i..i + src[i..].bytes().take_while(u8::is_ascii_alphabetic).count(), Highlight::new())).collect();
+            let row = timed(&mut rt, |rt| { rt.state.marks = ranges; rt.invalidate(); });
+            report(kb, "marks", &[row]);
+            let t = std::time::Instant::now();
+            let elements = rt.elements();
+            println!("MARKS requested={} reported={} nodes={} elements={} elements_ms={:.3}", rt.state.marks.len(), elements.iter().filter(|e| e.role == "mark").count(), rt.stats.layout_nodes, elements.len(), t.elapsed().as_secs_f64() * 1000.0);
+        }
+
         if run("open") {
             // The first frame of a fresh runtime: every text shaped once, its other widths re-broken.
             let rows: Vec<_> = (0..10).map(|_| {
                 let mut fonts = TextSystem::default();
                 fonts.layout_rich("Warm fonts", &[], rune::TextStyle::new(15.0, 400.0), 2.0, None);
-                let state = State { src: src.clone(), style: MarkdownStyle::neutral(true) };
+                let state = State { src: src.clone(), style: MarkdownStyle::neutral(true), marks: Vec::new() };
                 let mut rt = Runtime::with_text(state, view, (900.0, HEIGHT), Env::new(true, 2.0), fonts);
                 timed(&mut rt, |_| {})
             }).collect();

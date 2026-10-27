@@ -255,6 +255,8 @@ struct Builder {
     root_start: usize,
     cuts: Vec<Cut>,
     autolink: bool,
+    image_starts: Vec<usize>,
+    image_ranges: Vec<(usize, usize)>,
 }
 
 /// Where a top-level block starts: the start of its first line, and how many top-level blocks,
@@ -367,8 +369,10 @@ impl Builder {
                 s.0 < s.1
             });
             if self.autolink {
-                autolink_inline(&mut inl);
+                autolink_inline(&mut inl, &self.image_ranges);
             }
+            self.image_ranges.clear();
+            self.image_starts.clear();
             if let InlineKind::Cell = kind {
                 // Empty cells still hold their column.
                 if let Some((Container::Table(_, cells, _, _, cell_maps), _, _)) = self.stack.last_mut() {
@@ -431,9 +435,9 @@ fn code_span_content_range(src: &str, range: Range<usize>, rendered: &str) -> Ra
     let close = raw[open..].bytes().rev().take_while(|&b| b == b'`').count();
     let mut start = range.start + open;
     let mut end = range.end.saturating_sub(close);
-    if end.saturating_sub(start) == rendered.len() + 2
-        && src.as_bytes().get(start).is_some_and(|b| *b == b' ' || *b == b'\n')
-        && src.as_bytes().get(end.saturating_sub(1)).is_some_and(|b| *b == b' ' || *b == b'\n')
+    if !rendered.chars().all(|c| c == ' ')
+        && src.as_bytes().get(start).is_some_and(|b| matches!(b, b' ' | b'\r' | b'\n'))
+        && src.as_bytes().get(end.saturating_sub(1)).is_some_and(|b| matches!(b, b' ' | b'\r' | b'\n'))
     {
         start += 1;
         end -= 1;
@@ -441,10 +445,51 @@ fn code_span_content_range(src: &str, range: Range<usize>, rendered: &str) -> Ra
     if start < end { start..end } else { range }
 }
 
+/// Code spans normalize newlines and omit continuation-line container prefixes. Map the
+/// actual surviving characters, not a ratio of the source and displayed byte lengths.
+fn map_code_span(src: &str, range: Range<usize>, rendered: &str, offset: usize, map: &mut SpanMap) {
+    if &src[range.clone()] == rendered {
+        map.push(range, offset..offset + rendered.len());
+        return;
+    }
+    let mut out = 0;
+    let mut at = range.start;
+    for line in src[range].split_inclusive(['\r', '\n']) {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let remaining = &rendered[out..];
+        let matched = body.char_indices().find_map(|(skip, _)| {
+            let mut chars = body[skip..].char_indices().peekable();
+            let mut consumed = 0;
+            let mut pairs = Vec::new();
+            while let Some((i, mut c)) = chars.next() {
+                let mut end = i + c.len_utf8();
+                if c == '\\' && chars.peek().is_some_and(|(_, c)| *c == '|') && remaining[consumed..].starts_with('|') {
+                    let (j, next) = chars.next().unwrap();
+                    c = next;
+                    end = j + c.len_utf8();
+                }
+                if !remaining[consumed..].starts_with(c) { return None; }
+                pairs.push((at + skip + i..at + skip + end, offset + out + consumed..offset + out + consumed + c.len_utf8()));
+                consumed += c.len_utf8();
+            }
+            Some((consumed, pairs))
+        });
+        if let Some((consumed, pairs)) = matched {
+            for (src, dest) in pairs { map.push(src, dest); }
+            out += consumed;
+        }
+        if line.ends_with(['\r', '\n']) && rendered[out..].starts_with(' ') {
+            map.push(at + body.len()..at + line.len(), offset + out..offset + out + 1);
+            out += 1;
+        }
+        at += line.len();
+    }
+}
+
 /// Scans `inl.text` outside inline code and existing links for bare GFM autolinks (`https://…`,
 /// `http://…`, `www.…`) and wires them into `inl.links` and `inl.spans`.
-fn autolink_inline(inl: &mut Inline) {
-    if !inl.text.contains("https://") && !inl.text.contains("http://") && !inl.text.contains("www.") {
+fn autolink_inline(inl: &mut Inline, image_ranges: &[(usize, usize)]) {
+    if !inl.text.contains("://") && !inl.text.contains("www.") {
         return;
     }
     let mut excluded: Vec<(usize, usize)> = inl
@@ -452,6 +497,7 @@ fn autolink_inline(inl: &mut Inline) {
         .iter()
         .filter(|(_, _, st)| matches!(st, Style::Code | Style::CodePad | Style::Link))
         .map(|&(a, b, _)| (a, b))
+        .chain(image_ranges.iter().copied())
         .collect();
     excluded.sort_unstable_by_key(|&(a, _)| a);
 
@@ -494,9 +540,9 @@ fn scan_bare_urls(text: &str, seg_start: usize, seg_end: usize, out: &mut Vec<(u
     let mut i = seg_start;
     while i < seg_end {
         let rest = &text[i..seg_end];
-        let (prefix_len, is_www) = if rest.starts_with("https://") {
+        let (prefix_len, is_www) = if rest.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) {
             (8, false)
-        } else if rest.starts_with("http://") {
+        } else if rest.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://")) {
             (7, false)
         } else if rest.starts_with("www.") {
             (4, true)
@@ -624,6 +670,8 @@ fn parse_doc(src: &str, autolink: bool) -> (Vec<Block>, Vec<Source>, Vec<Option<
         root_start: 0,
         cuts: Vec::new(),
         autolink,
+        image_starts: Vec::new(),
+        image_ranges: Vec::new(),
     };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
@@ -719,6 +767,10 @@ fn parse_doc(src: &str, autolink: bool) -> (Vec<Block>, Vec<Source>, Vec<Option<
                 Tag::Emphasis => open(&mut b, Style::Em, None),
                 Tag::Strikethrough => open(&mut b, Style::Strike, None),
                 Tag::Link { dest_url, .. } => open(&mut b, Style::Link, Some(dest_url.into_string())),
+                Tag::Image { .. } => {
+                    let start = b.inline().1.text.len();
+                    b.image_starts.push(start);
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -744,6 +796,12 @@ fn parse_doc(src: &str, autolink: bool) -> (Vec<Block>, Vec<Source>, Vec<Option<
                 }
                 TagEnd::BlockQuote(_) | TagEnd::Item | TagEnd::List(_) | TagEnd::Table => b.pop_container(),
                 TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => close(&mut b),
+                TagEnd::Image => {
+                    if let Some(start) = b.image_starts.pop() {
+                        let end = b.inline().1.text.len();
+                        b.image_ranges.push((start, end));
+                    }
+                }
                 _ => {}
             },
             Event::Text(t) => {
@@ -770,7 +828,7 @@ fn parse_doc(src: &str, autolink: bool) -> (Vec<Block>, Vec<Source>, Vec<Option<
                 inl.1.spans.push((a, start, Style::CodePad));
                 inl.1.spans.push((start, end, Style::Code));
                 inl.1.spans.push((end, inl.1.text.len(), Style::CodePad));
-                inl.3.push(code_src, start..end);
+                map_code_span(src, code_src, &t, start, &mut inl.3);
             }
             Event::SoftBreak => {
                 let inl = b.inline();
@@ -1567,6 +1625,9 @@ impl Markdown {
     /// reachable by [`Tx::scroll_into_view`](rune::Tx::scroll_into_view) and
     /// [`Cx::layout`](rune::Cx::layout) under its [`Highlight::key`], or under
     /// [`Markdown::highlight_key`]`(i)` when no key was set on it.
+    /// Backgrounds, rings and foreground colours are paint-only. Matches add no layout nodes;
+    /// [`Runtime::elements`](rune::Runtime::elements) reports a `mark` per rendered fragment.
+    /// Empty/out-of-source ranges paint nothing; partial UTF-8 characters expand to boundaries.
     pub fn highlights(mut self, highlights: impl IntoIterator<Item = impl HighlightItem>) -> Self {
         self.highlights = highlights.into_iter().map(HighlightItem::into_highlight).collect();
         self
@@ -1578,6 +1639,7 @@ impl Markdown {
     }
     /// Whether bare `https://…`, `http://…` and `www.…` URLs in plain text are autolinked
     /// (`true` by default).
+    /// This is URL-only: bare email addresses remain text; `<name@example.org>` still links.
     pub fn autolink(mut self, on: bool) -> Self {
         self.autolink = on;
         self

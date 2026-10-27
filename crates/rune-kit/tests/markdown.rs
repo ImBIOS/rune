@@ -1459,3 +1459,106 @@ fn scroll_into_view_scrolls_to_highlighted_match_in_tall_document_and_code_block
     assert!(m2[1] >= 0.0 && m2[1] + m2[3] <= 200.5, "deep code-block highlight scrolled into viewport: {m2:?}");
 }
 
+#[test]
+fn review_highlight_mapping_edges_and_streaming() {
+    type State = (String, Vec<(std::ops::Range<usize>, Highlight)>);
+    fn view((src, marks): &State, _: &mut Cx<State>) -> El {
+        col().w(480.0).child(Markdown::new(src.as_str()).highlights(marks).build(&Kit::neutral(true)))
+    }
+    for (src, needle, expected) in [
+        ("before &amp; after", "amp", "&"),
+        ("before \\* after", "*", "*"),
+        ("before <b>after</b>", "after", "after"),
+        ("one\r\ntwo", "two", "two"),
+        ("one  \r\ntwo", "two", "two"),
+        ("> - nested **needle**", "needle", "needle"),
+        ("left שלום world right", "שלום world", "שלום world"),
+        ("| a | b |\n|---|---|\n| a\\|needle | end |", "needle", "needle"),
+        ("| a |\n|---|\n| `a\\|needle` |", "needle", "needle"),
+        ("`a\r\nb needle`", "needle", "needle"),
+        ("`a\r\nbb cc dd ee ff gg hh`", "bb", "bb"),
+        ("` a\r\nbb cc dd ee ff gg hh `", "bb", "bb"),
+        ("`a bb cc dd ee ff gg\r\nhh ii`", "bb", "bb"),
+        ("`a\r\nbb cc dd ee ff gg hh`", "gg", "gg"),
+        ("> `one\n> two three four five`", "three", "three"),
+        ("- `one\n  two three four five`", "three", "three"),
+        ("https://example.org/needle", "needle", "needle"),
+        ("reference [^needle]\n\n[^needle]: text", "needle", "needle"),
+    ] {
+        let start = src.find(needle).unwrap();
+        let mut rt = Runtime::new((src.into(), vec![(start..start + needle.len(), Highlight::new())]), view, (480.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let labels: Vec<_> = rt.elements().into_iter().filter(|e| e.role == "mark").filter_map(|e| e.label).collect();
+        assert_eq!(labels, [expected], "source={src:?}");
+    }
+    let src = "αβ **needle**\n\nsecond https://example.org/path";
+    let start = src.find("needle").unwrap();
+    let marks = vec![(start..start + 6, Highlight::new()), (1..3, Highlight::current()), (usize::MAX - 1..usize::MAX, Highlight::new())];
+    let mut rt = Runtime::new((String::new(), marks), view, (480.0, 200.0), Env::new(true, 1.0));
+    for end in 0..=src.len() {
+        if !src.is_char_boundary(end) { continue; }
+        rt.state.0 = src[..end].into();
+        rt.invalidate();
+        rt.frame(0.0);
+        for e in rt.elements().into_iter().filter(|e| e.role == "mark") {
+            assert_ne!(e.key.as_deref(), Some("md-mark-2"));
+        }
+    }
+    rt.state.1 = vec![(start..start + 6, Highlight::current().fg(rune::Color::WHITE))];
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(rt.stats.shaped, 0, "changing highlights including foreground must reuse the shape cache");
+}
+
+#[test]
+fn review_marks_do_not_wrap_large_offsets_or_intercept_links() {
+    struct State { opened: Vec<String> }
+    fn view(_: &State, _: &mut Cx<State>) -> El {
+        let src = "~~https://example.org/path~~ and שלום world";
+        col().w(220.0).child(Markdown::new(src).selectable(true)
+            .highlights([(10..24, Highlight::new()), (2..26, Highlight::current().key("hit"))])
+            .on_link(|s: &mut State, url| s.opened.push(url.into())).build(&Kit::neutral(true)))
+            .child(rune::text("plain").text_highlight(rune::TextHighlight::new(
+                (u32::MAX as usize + 1)..(u32::MAX as usize + 5), rune::Color::WHITE).key("outside")))
+    }
+    let mut rt = Runtime::new(State { opened: Vec::new() }, view, (220.0, 180.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(rt.find("outside").is_none(), "large offsets must not wrap to the beginning of text");
+    assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("outside")));
+    let (x, y) = rt.find("hit").unwrap();
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.opened, ["https://example.org/path"]);
+}
+
+#[test]
+fn review_autolinks_skip_images_emails_and_unsafe_schemes() {
+    let src = "HTTP://example.org/a, ![https://image.example/alt](image.png) [https://label.example](https://dest.example) <https://angle.example> `https://code.example` foo@bar.com javascript:alert(1) data:text/plain,test";
+    let blocks = parse(src);
+    let Block::Para(p) = &blocks[0] else { panic!("{blocks:?}") };
+    assert_eq!(p.links.iter().map(|(_, _, u)| u.as_str()).collect::<Vec<_>>(),
+        ["HTTP://example.org/a", "https://dest.example", "https://angle.example"]);
+}
+
+#[test]
+fn review_two_thousand_matches_add_no_layout_nodes_or_shapes() {
+    type State = (String, bool);
+    fn view((src, marked): &State, _: &mut Cx<State>) -> El {
+        let ranges = if *marked { src.match_indices("needle").map(|(i, _)| (i..i + 6, Highlight::new())).collect() } else { Vec::new() };
+        col().w(480.0).h(200.0).scroll(ScrollSpec { stick_bottom: false })
+            .child(Markdown::new(src.as_str()).highlights(ranges).build(&Kit::neutral(true)))
+    }
+    let src = "needle needle needle needle with some fictional filler words.\n\n".repeat(500);
+    let mut rt = Runtime::new((src, false), view, (480.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let nodes = rt.stats.layout_nodes;
+    rt.state.1 = true;
+    rt.invalidate();
+    rt.frame(0.0);
+    assert_eq!(rt.stats.shaped, 0);
+    assert_eq!(rt.stats.layout_nodes, nodes);
+    assert_eq!(rt.elements().iter().filter(|e| e.role == "mark").count(), 2000);
+    assert!(rt.find("md-mark-1999").is_some());
+}
