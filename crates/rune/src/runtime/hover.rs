@@ -309,7 +309,12 @@ impl<S: 'static> Runtime<S> {
             if self.is_exiting(n.id) { continue; }
             match self.hover_flip(i, captured) {
                 Some(f) if f.changed => flips.push(f),
-                Some(f) => self.scene.animate(f.id, P_HOVER, f.on as u8 as f32, f.anim),
+                // Default hover animations inherit velocity and have no completion token.
+                // An unchanged target preserves its trajectory in the store already; avoid
+                // dirtying the scene node for that no-op. Custom animations may carry an
+                // explicit velocity, decay or token and must still reach the store.
+                Some(f) if n.vis.hover_motion.is_some() => self.scene.animate(f.id, P_HOVER, f.on as u8 as f32, f.anim),
+                Some(_) => {}
                 None => {}
             }
             if n.vis.press.a <= 0.0 && n.press_scale.is_none() { continue; }
@@ -345,3 +350,7 @@ impl<S: 'static> Runtime<S> {
         changed
     }
 }
+
+#[cfg(test)]
+#[path = "hover_tests.rs"]
+mod tests;

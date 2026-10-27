@@ -1,0 +1,1 @@
+- Scrolling long lists and sticky sidebars spends less CPU on unchanged hover highlights, preserving their enter and exit animations.
