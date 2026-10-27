@@ -5,7 +5,8 @@ use super::*;
 impl<S: 'static> Live<S> {
     /// The window's root: the app's view above the bar, or the playground around its stage.
     pub(crate) fn view(&self, app: &S, view: fn(&S, &mut Cx<S>) -> El, cx: &mut Cx<S>, viewport: (f32, f32)) -> El {
-        let t = tok::theme(cx.system_dark());
+        let dark = self.app_dark.map_or_else(|| cx.system_dark(), |dark| dark(app));
+        let t = tok::theme(dark);
         if !self.open {
             if !self.bar { return call(view, app, cx); }
             let root = call(view, app, cx);
@@ -15,9 +16,8 @@ impl<S: 'static> Live<S> {
                 .child(root.w(viewport.0).h((viewport.1 - BAR).max(0.0)))
                 .child(self.bar_view(t));
         }
-        let dark = cx.system_dark();
         let stage_w = (viewport.0 - SIDEBAR - SIDE - 2.0).max(0.0);
-        let stage = self.stage(app, view, cx, (stage_w, viewport.1), t);
+        let stage = self.stage(app, view, cx, (stage_w, viewport.1), t, dark);
         let side = self.side(app, cx, t, dark, viewport.1);
         row().key("playground").w(viewport.0).h(viewport.1).fill(t.bg)
             .child(self.sidebar(t, dark, cx.titlebar_inset(), viewport.1))
@@ -213,9 +213,9 @@ impl<S: 'static> Live<S> {
         root
     }
 
-    fn stage(&self, app: &S, view: fn(&S, &mut Cx<S>) -> El, cx: &mut Cx<S>, area: (f32, f32), t: Theme) -> El {
+    fn stage(&self, app: &S, view: fn(&S, &mut Cx<S>) -> El, cx: &mut Cx<S>, area: (f32, f32), t: Theme, dark: bool) -> El {
         let mut env = cx.env();
-        if let Some(dark) = self.dark { env.system_dark = dark; }
+        env.system_dark = self.dark.unwrap_or(dark);
         let page = self.page();
         let frame = self.own().and_then(|(own, _)| own.frame());
         let preset = self.size.checked_sub(1).and_then(|i| self.sizes.get(i)).map(|(_, size)| *size);

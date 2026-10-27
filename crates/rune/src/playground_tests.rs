@@ -598,3 +598,6 @@ mod variants;
 
 #[path = "playground/keys_tests.rs"]
 mod keys;
+
+#[path = "playground/chrome_tests.rs"]
+mod chrome;
