@@ -49,27 +49,72 @@ pub(super) fn uber_wgsl_hash(wgsl: &str) -> blake3::Hash {
     blake3::hash(wgsl.as_bytes())
 }
 
-// Hash the actual renderer/layout and generator, not a second handwritten description of them.
-// This deliberately invalidates on unrelated renderer edits too: a safe false positive is better
-// than silently passing incompatible bindings to an unchecked shader. Const evaluation keeps the
-// source files out of the executable. The manifest also covers the exact backend version pins.
+pub(super) const fn uber_bind_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+    let uniform = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let texture = wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    };
+    [
+        wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: uniform, count: None },
+        wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: texture, count: None },
+        wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: texture, count: None },
+        wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: uniform, count: None },
+    ]
+}
+
+pub(super) fn uber_pipeline_layout<'a>(layouts: &'a [Option<&'a wgpu::BindGroupLayout>; 2], springs: bool) -> wgpu::PipelineLayoutDescriptor<'a> {
+    wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &layouts[..if springs { 2 } else { 1 }],
+        immediate_size: 0,
+    }
+}
+
+pub(super) fn uber_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<super::Instance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &UBER_VERTEX_ATTRS,
+    }
+}
+
+pub(super) fn uber_primitive() -> wgpu::PrimitiveState {
+    wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() }
+}
+
+// Descriptor values shared with Renderer::create, not their source spelling or labels.
+// WGSL, generated MSL, and the actual Naga options have separate fingerprints below.
 #[cfg(any(test, target_os = "macos"))]
-const fn uber_abi_hash() -> u64 {
-    let inputs: [&[u8]; 3] = [
-        include_bytes!("render.rs"),
-        include_bytes!("metallib.rs"),
-        include_bytes!("../Cargo.toml"),
-    ];
+fn uber_abi_hash() -> u64 {
+    layout_hash(&uber_bind_entries(), &uber_vertex_layout(), uber_primitive())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn layout_hash(entries: &[wgpu::BindGroupLayoutEntry], vertex: &wgpu::VertexBufferLayout<'_>, primitive: wgpu::PrimitiveState) -> u64 {
+    // The normal uber pipeline has one group; use a placeholder instead of hashing opaque GPU
+    // handle IDs. The springs pipeline has a second group and never uses this library.
+    let groups = [None, None];
+    let layout = uber_pipeline_layout(&groups, false);
+    descriptor_hash(entries, vertex, primitive, &layout)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn descriptor_hash(entries: &[wgpu::BindGroupLayoutEntry], vertex: &wgpu::VertexBufferLayout<'_>, primitive: wgpu::PrimitiveState, layout: &wgpu::PipelineLayoutDescriptor<'_>) -> u64 {
+    fnv1a64(format!("{entries:?}|{}|{}|{vertex:?}|{primitive:?}",
+        layout.bind_group_layouts.len(), layout.immediate_size).as_bytes())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
-    let mut i = 0;
-    while i < inputs.len() {
-        let mut j = 0;
-        while j < inputs[i].len() {
-            h = (h ^ inputs[i][j] as u64).wrapping_mul(0x100000001b3);
-            j += 1;
-        }
-        h = (h ^ 0xff).wrapping_mul(0x100000001b3);
-        i += 1;
+    for &b in bytes {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
     }
     h
 }
@@ -120,7 +165,7 @@ fn try_uber_metallib<T>(
     if !device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
         return None;
     }
-    if metallib != UBER_METALLIB || const { uber_abi_hash() } != UBER_ABI_FNV64 {
+    if metallib != UBER_METALLIB || uber_abi_hash() != UBER_ABI_FNV64 {
         return None;
     }
     if uber_wgsl_hash(wgsl).to_hex().as_str() != expected_wgsl_hash {
@@ -130,8 +175,9 @@ fn try_uber_metallib<T>(
     let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
     // SAFETY: only our embedded macOS library is accepted, never caller-provided shader code.
     // Its validated Naga MSL retains bounds checks and loop bounding; the ABI fingerprint above
-    // covers the renderer's bindings, immediates, instance layout, generator and exact backend
-    // pins. Vertex pulling uses buffer(30), and Metal supplies its sizes even for passthrough.
+    // covers the renderer's bindings, immediates and vertex/primitive layout. Freshness tests
+    // cover the generator's actual MSL/options; pixel equivalence guards backend patch updates.
+    // Vertex pulling uses buffer(30), and Metal supplies its sizes even for passthrough.
     // No storage/workgroup arrays or specialization constants are used (HAL cannot reflect those
     // from passthrough). Unsupported OS/GPU libraries and pipeline linkage failures are caught
     // before any draw. Pixel equivalence and regeneration tests check the committed artifact.
@@ -180,7 +226,7 @@ pub(super) fn with_metallib_enabled<R>(enabled: bool, f: impl FnOnce() -> R) -> 
 /// bindings, vertex-pulling transform (`buffer(30)`), and runtime check policies that `wgpu-hal`
 /// uses on Metal for `Renderer::new`.
 #[cfg(all(test, target_os = "macos"))]
-fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (String, String) {
+fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (String, String, u64) {
     use wgpu::naga::{
         self,
         back::{msl, pipeline_constants::process_overrides},
@@ -199,34 +245,38 @@ fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (St
     .validate(&module)
     .expect("validate uber WGSL");
 
-    let mut vs_resources = msl::EntryPointResources::default();
-    vs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 0 },
-        msl::BindTarget { buffer: Some(0), ..Default::default() },
-    );
-    vs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 3 },
-        msl::BindTarget { buffer: Some(1), ..Default::default() },
-    );
-    vs_resources.sizes_buffer = Some(2);
-
-    let mut fs_resources = msl::EntryPointResources::default();
-    fs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 0 },
-        msl::BindTarget { buffer: Some(0), ..Default::default() },
-    );
-    fs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 1 },
-        msl::BindTarget { texture: Some(0), ..Default::default() },
-    );
-    fs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 2 },
-        msl::BindTarget { texture: Some(1), ..Default::default() },
-    );
-    fs_resources.resources.insert(
-        naga::ResourceBinding { group: 0, binding: 3 },
-        msl::BindTarget { buffer: Some(1), ..Default::default() },
-    );
+    // Follow HAL's per-stage allocation, using the renderer's actual entries. Fail closed if
+    // the shader gains storage/arrays: passthrough cannot provide their sized-binding metadata.
+    let resources = |stage: wgpu::ShaderStages| {
+        let groups = [None, None];
+        let layout = uber_pipeline_layout(&groups, false);
+        assert_eq!(layout.immediate_size, 0, "audit Metal immediate-data mapping before precompiling");
+        let mut result = msl::EntryPointResources::default();
+        let (mut buffer, mut texture) = (0, 0);
+        let mut entries = uber_bind_entries();
+        entries.sort_by_key(|entry| entry.binding);
+        for entry in entries {
+            if !entry.visibility.contains(stage) { continue; }
+            assert!(entry.count.is_none(), "passthrough binding arrays need an audit");
+            let mut target = msl::BindTarget::default();
+            match entry.ty {
+                wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, .. } => {
+                    target.buffer = Some(buffer);
+                    buffer += 1;
+                }
+                wgpu::BindingType::Texture { .. } => {
+                    target.texture = Some(texture);
+                    texture += 1;
+                }
+                _ => panic!("audit new uber binding type before precompiling"),
+            }
+            result.resources.insert(naga::ResourceBinding { group: 0, binding: entry.binding }, target);
+        }
+        if stage == wgpu::ShaderStages::VERTEX { result.sizes_buffer = Some(buffer); }
+        result
+    };
+    let vs_resources = resources(wgpu::ShaderStages::VERTEX);
+    let fs_resources = resources(wgpu::ShaderStages::FRAGMENT);
 
     let attributes = attrs
         .iter()
@@ -239,7 +289,10 @@ fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (St
     let vbm = msl::VertexBufferMapping {
         id: 30,
         stride,
-        step_mode: msl::VertexBufferStepMode::ByInstance,
+        step_mode: match uber_vertex_layout().step_mode {
+            wgpu::VertexStepMode::Instance => msl::VertexBufferStepMode::ByInstance,
+            wgpu::VertexStepMode::Vertex => msl::VertexBufferStepMode::ByVertex,
+        },
         attributes,
     };
 
@@ -275,7 +328,7 @@ fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (St
         };
         let pipeline_options = msl::PipelineOptions {
             entry_point: Some((stage, ep.to_owned())),
-            allow_and_force_point_size: false,
+            allow_and_force_point_size: uber_primitive().topology == wgpu::PrimitiveTopology::PointList,
             vertex_pulling_transform: true,
             vertex_buffer_mappings,
             binding_array_length_map: Default::default(),
@@ -288,12 +341,13 @@ fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (St
             Ok(ep),
             "MSL entry point name must match WGSL entry point"
         );
-        msl
+        // Resource maps are ordered; the binding-array map is empty (arrays rejected above).
+        (msl, format!("{options:?}\n{pipeline_options:?}"))
     };
 
-    let vs_msl = translate(naga::ShaderStage::Vertex, "vs", vs_resources, vec![vbm]);
-    let fs_msl = translate(naga::ShaderStage::Fragment, "fs", fs_resources, Vec::new());
-    (vs_msl, fs_msl)
+    let (vs_msl, vs_options) = translate(naga::ShaderStage::Vertex, "vs", vs_resources, vec![vbm]);
+    let (fs_msl, fs_options) = translate(naga::ShaderStage::Fragment, "fs", fs_resources, Vec::new());
+    (vs_msl, fs_msl, fnv1a64(format!("{vs_options}\n{fs_options}").as_bytes()))
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -311,15 +365,6 @@ fn uber_msl_hash(vs_msl: &str, fs_msl: &str) -> blake3::Hash {
 mod tests {
     use super::*;
 
-    fn fnv1a64(bytes: &[u8]) -> u64 {
-        let mut h = 0xcbf29ce484222325u64;
-        for &b in bytes {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h
-    }
-
     /// Called by `scripts/precompile-metal-shaders.sh` (`--ignored --exact --nocapture`) to emit
     /// the Naga-translated MSL and BLAKE3 digests for the current `shader.wgsl` + `clip.wgsl`.
     #[cfg(target_os = "macos")]
@@ -328,26 +373,26 @@ mod tests {
     fn dump_uber_msl() {
         let wgsl = uber_wgsl();
         let wgsl_hash = uber_wgsl_hash(&wgsl);
-        let (vs_msl, fs_msl) =
+        let (vs_msl, fs_msl, options_hash) =
             uber_msl(&wgsl, &UBER_VERTEX_ATTRS, std::mem::size_of::<super::super::Instance>() as u32);
         let msl_hash = uber_msl_hash(&vs_msl, &fs_msl);
         println!("---BEGIN_WGSL_BLAKE3---\n{}\n---END_WGSL_BLAKE3---", wgsl_hash.to_hex());
         println!("---BEGIN_MSL_BLAKE3---\n{}\n---END_MSL_BLAKE3---", msl_hash.to_hex());
         println!("---BEGIN_METAL_FLAGS---\n{METAL_COMPILE_FLAGS}\n---END_METAL_FLAGS---");
         println!("---BEGIN_ABI_FNV64---\n{:016x}\n---END_ABI_FNV64---", uber_abi_hash());
+        println!("---BEGIN_OPTIONS_FNV64---\n{options_hash:016x}\n---END_OPTIONS_FNV64---");
         println!("---BEGIN_VS_MSL---\n{vs_msl}---END_VS_MSL---");
         println!("---BEGIN_FS_MSL---\n{fs_msl}---END_FS_MSL---");
     }
 
     #[test]
     fn precompiled_uber_metallib_is_fresh() {
-        assert_eq!(uber_abi_hash(), UBER_ABI_FNV64,
-            "renderer layout, generator or backend pins changed; run scripts/precompile-metal-shaders.sh");
         let wgsl = uber_wgsl();
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             uber_wgsl_hash(&wgsl).to_hex().as_str(),
             UBER_WGSL_BLAKE3,
-            "crates/rune/src/uber.metallib is stale after WGSL changes; run scripts/precompile-metal-shaders.sh"
+            "WGSL changed; run this freshness test on macOS to check whether MSL needs regeneration"
         );
         assert!(
             UBER_METALLIB.starts_with(b"MTLB") && UBER_METALLIB.len() > 1024,
@@ -362,23 +407,83 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             let stride = std::mem::size_of::<super::super::Instance>() as u32;
-            let (vs_msl, fs_msl) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride);
+            let (vs_msl, fs_msl, options_hash) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride);
             assert_eq!(
                 uber_msl_hash(&vs_msl, &fs_msl).to_hex().as_str(),
                 UBER_MSL_BLAKE3,
-                "Naga MSL output or options changed; run scripts/precompile-metal-shaders.sh"
+                "generated MSL or Metal compile flags changed; run scripts/precompile-metal-shaders.sh"
             );
+
+            let wgsl_hash = uber_wgsl_hash(&wgsl).to_hex().to_string();
+            assert!(uber_abi_hash() == UBER_ABI_FNV64
+                && options_hash == UBER_MSL_OPTIONS_FNV64
+                && wgsl_hash == UBER_WGSL_BLAKE3,
+                "MSL is byte-identical; no Xcode or metallib regeneration needed. Paste these lines into crates/rune/src/uber_metallib_hash.rs:\n\
+pub(super) const UBER_ABI_FNV64: u64 = 0x{:016x};\n\
+pub(super) const UBER_MSL_OPTIONS_FNV64: u64 = 0x{options_hash:016x};\n\
+pub(super) const UBER_WGSL_BLAKE3: &str = \"{wgsl_hash}\";", uber_abi_hash());
 
             // Perturbing WGSL or vertex layout must change the hash so staleness cannot hide.
             let mut altered_wgsl = wgsl.clone();
             altered_wgsl.push_str("\n// perturbed\n");
             assert_ne!(uber_wgsl_hash(&altered_wgsl).to_hex().as_str(), UBER_WGSL_BLAKE3);
 
-            let (vs_stride_changed, _) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride + 16);
+            let (vs_stride_changed, _, changed_options) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride + 16);
+            assert_ne!(changed_options, options_hash);
             assert_ne!(
                 uber_msl_hash(&vs_stride_changed, &fs_msl).to_hex().as_str(),
                 UBER_MSL_BLAKE3
             );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(uber_abi_hash(), UBER_ABI_FNV64,
+            "descriptor fingerprint changed; run this test on macOS for exact replacement hash lines (no Xcode if MSL is unchanged)");
+    }
+
+    #[test]
+    fn semantic_fingerprint_tracks_descriptors_not_source_text() {
+        let entries = uber_bind_entries();
+        let vertex = uber_vertex_layout();
+        let primitive = uber_primitive();
+        let baseline = layout_hash(&entries, &vertex, primitive);
+        let mut changed = entries;
+        changed[0].visibility = wgpu::ShaderStages::VERTEX;
+        assert_ne!(layout_hash(&changed, &vertex, primitive), baseline);
+        changed = entries;
+        changed[0].binding = 4;
+        assert_ne!(layout_hash(&changed, &vertex, primitive), baseline);
+        let mut changed_vertex = uber_vertex_layout();
+        changed_vertex.array_stride += 16;
+        assert_ne!(layout_hash(&entries, &changed_vertex, primitive), baseline);
+        changed_vertex = uber_vertex_layout();
+        changed_vertex.step_mode = wgpu::VertexStepMode::Vertex;
+        assert_ne!(layout_hash(&entries, &changed_vertex, primitive), baseline);
+        let mut attrs = UBER_VERTEX_ATTRS;
+        attrs[0].offset += 4;
+        changed_vertex = uber_vertex_layout();
+        changed_vertex.attributes = &attrs;
+        assert_ne!(layout_hash(&entries, &changed_vertex, primitive), baseline);
+        let mut changed_primitive = primitive;
+        changed_primitive.strip_index_format = Some(wgpu::IndexFormat::Uint32);
+        assert_ne!(layout_hash(&entries, &vertex, changed_primitive), baseline);
+        changed_primitive = primitive;
+        changed_primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+        assert_ne!(layout_hash(&entries, &vertex, changed_primitive), baseline);
+        let groups = [None, None];
+        let mut layout = uber_pipeline_layout(&groups, false);
+        layout.immediate_size = 16;
+        assert_ne!(descriptor_hash(&entries, &vertex, primitive, &layout), baseline);
+        let layout = uber_pipeline_layout(&groups, true);
+        assert_ne!(descriptor_hash(&entries, &vertex, primitive, &layout), baseline);
+        // Labels, comments, and unrelated Rust source are deliberately not inputs.
+        assert_eq!(layout_hash(&entries, &vertex, primitive), baseline);
+        #[cfg(target_os = "macos")]
+        {
+            let wgsl = uber_wgsl();
+            let stride = vertex.array_stride as u32;
+            let original = uber_msl(&wgsl, vertex.attributes, stride);
+            let comment_only = uber_msl(&format!("{wgsl}\n// unrelated comment\n"), vertex.attributes, stride);
+            assert_eq!(original, comment_only, "comment edits must not require a Metal compiler");
         }
     }
 

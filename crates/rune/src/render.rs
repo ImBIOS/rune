@@ -595,45 +595,7 @@ impl Renderer {
         };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-            ],
+            entries: &metallib::uber_bind_entries(),
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -646,11 +608,9 @@ impl Renderer {
         let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in, None);
         let spring_layout = properties.map(|_| crate::gpu_springs::Bindings::layout(device));
         let layouts = [Some(&bgl), spring_layout.as_ref()];
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &layouts[..if properties.is_some() { 2 } else { 1 }],
-            immediate_size: 0,
-        });
+        let layout = device.create_pipeline_layout(&metallib::uber_pipeline_layout(
+            &layouts, properties.is_some(),
+        ));
         let vertex_entry = if properties.is_some() { "vs_springs" } else { "vs" };
         let make_pipeline = |shader: &wgpu::ShaderModule| Self::pipeline(device, &layout, shader, format, vertex_entry, Blend::SourceOver);
         let (shader, pipeline) = match spring_shader {
@@ -703,13 +663,9 @@ impl Renderer {
                 module: shader,
                 entry_point: Some(vertex_entry),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Instance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &metallib::UBER_VERTEX_ATTRS,
-                })],
+                buffers: &[Some(metallib::uber_vertex_layout())],
             },
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            primitive: metallib::uber_primitive(),
             depth_stencil: None,
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {

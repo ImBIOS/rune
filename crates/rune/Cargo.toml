@@ -28,9 +28,8 @@ procwatch = { path = "../procwatch", optional = true }
 subsecond = { version = "=0.7.10", optional = true }
 dioxus-devtools = { version = "=0.7.10", optional = true }
 rune-motion = { path = "../rune-motion" }
-# The precompiled Metal ABI is audited against these exact wgpu/core/hal versions.
-# Updating either requires regenerating the library, even if Naga's output is unchanged.
-wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+# Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 # Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
@@ -72,8 +71,8 @@ web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlE
 rfd = { version = "0.17", optional = true, default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu-hal = { version = "=30.0.1", default-features = false }
-wgpu-core = { version = "=30.0.1", default-features = false }
+wgpu-hal = { version = "~30.0.1", default-features = false }
+wgpu-core = { version = "~30.0.1", default-features = false }
 objc2 = "0.5.2"
 block2 = "0.5"
 objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSRange", "NSValue", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults"] }

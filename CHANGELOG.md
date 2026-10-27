@@ -7,8 +7,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 - **Metal shader fallback also covers pipeline creation.** If Metal accepts the precompiled
   library but rejects its pipeline, `Renderer::new` retries with WGSL without an uncaptured GPU
-  error. Renderer/layout and generator edits invalidate the precompiled ABI fingerprint; the
-  audited wgpu/core/hal versions are pinned so backend updates require regeneration too.
+  error. Shared layout descriptors and the actual Naga options have semantic fingerprints;
+  unrelated Rust edits do not invalidate them. Freshness tests print replacement hash lines
+  when MSL is unchanged, without needing Xcode. wgpu/core/hal allow `30.0.x` patch updates.
 - **Precompiled Metal uber shader on macOS (`crates/rune/src/uber.metallib`).** `Gpu` now enables
   `wgpu::Features::PASSTHROUGH_SHADERS` on macOS when the adapter supports it, and `Renderer::new` loads a
   committed 33 KB precompiled Metal library (`-std=macos-metal2.3 -mmacosx-version-min=11.0
@@ -18,7 +19,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `3.4 ms → 0.6 ms` warm). Falls back to the WGSL path when `PASSTHROUGH_SHADERS` is absent,
   `RUNE_DISABLE_METALLIB=1` is set, the WGSL/ABI fingerprint mismatches, or library/pipeline creation fails; app
   builds do not require Xcode (`scripts/precompile-metal-shaders.sh` regenerates the `.metallib`
-  when WGSL, the renderer/layout, generator, or backend version pins change).
+  when generated MSL or Metal compile flags change).
 - **macOS: live window resizes no longer stretch the last frame.** While the user drags a window
   edge, Rune draws each new size inside AppKit's resize and presents it in the same Core Animation
   transaction (`presentsWithTransaction` for the drag, back to its own present on the first frame
