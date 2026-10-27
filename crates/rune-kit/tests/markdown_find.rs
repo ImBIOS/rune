@@ -379,3 +379,91 @@ fn one_megabyte_document_searches_linearly() {
     let sensitive = find(&doc, "Continuation line", Case::Sensitive);
     assert_eq!(sensitive.len(), repeats);
 }
+
+#[test]
+fn frequent_matches_in_single_segment_are_linear() {
+    let n = 200_000;
+    let src = "a".repeat(n);
+    let hits = find(&src, "a", Case::Sensitive);
+    assert_eq!(hits.len(), n);
+    assert_eq!(hits[0], vec![0..1]);
+    assert_eq!(hits[n - 1], vec![n - 1..n]);
+}
+
+#[test]
+fn rejected_unicode_mid_char_candidates_search_linearly() {
+    let n = 200_000;
+    let k = 2_000;
+    let mut src = "İ".repeat(n);
+    let query = format!("{}i", "i\u{307}".repeat(k));
+    assert!(find(&src, &query, Case::Insensitive).is_empty());
+
+    // Appending a real ASCII 'i' at the end lets the last k 'İ' chars + 'i' match on char boundaries.
+    src.push('i');
+    let hits = find(&src, &query, Case::Insensitive);
+    assert_eq!(hits, vec![vec![(n - k) * "İ".len()..src.len()]]);
+}
+
+#[test]
+fn unsorted_and_overlapping_multi_range_highlights_keep_all_ranges() {
+    let mut rt = Runtime::new(
+        "alpha beta gamma",
+        |src, _| {
+            let k = Kit::neutral(true);
+            col()
+                .w(400.0)
+                .child(
+                    Markdown::new(*src)
+                        .highlights(vec![vec![11..16, 0..5], vec![2..5, 0..3]])
+                        .build(&k),
+                )
+        },
+        (400.0, 120.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    let marks: Vec<_> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "mark")
+        .map(|e| (e.key.unwrap_or_default(), e.label.unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        marks,
+        vec![
+            ("md-mark-0".to_owned(), "alpha".to_owned()),
+            ("md-mark-0".to_owned(), "gamma".to_owned()),
+            ("md-mark-1".to_owned(), "alpha".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn highlighting_fragmented_match_is_linear() {
+    // 100k bold tokens -> 199,999 source ranges in a single match and 200,000 SpanMap entries.
+    let n = 100_000;
+    let src = "**a** ".repeat(n);
+    let q = "a ".repeat(n);
+    let hits = find(&src, q.trim_end(), Case::Sensitive);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].len(), 2 * n - 1);
+    let _el = Markdown::new(src).highlights(hits).render(&MarkdownStyle::neutral(true));
+
+    // Also verify end-to-end mark merging in Runtime.
+    let small_n = 500;
+    let small_src = "**a** ".repeat(small_n);
+    let small_q = "a ".repeat(small_n);
+    let expected = small_q.trim_end().to_owned();
+    let small_hits = find(&small_src, &expected, Case::Sensitive);
+    let mut rt = Runtime::new(
+        (small_src, small_hits),
+        |(s, h), _| col().w(600.0).child(Markdown::new(s.as_str()).highlights(h).build(&Kit::neutral(true))),
+        (600.0, 200.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    let marks: Vec<_> = rt.elements().into_iter().filter(|e| e.role == "mark").collect();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].label.as_deref(), Some(expected.as_str()));
+}
+
