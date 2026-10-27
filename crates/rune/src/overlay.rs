@@ -36,6 +36,10 @@ use crate::tooling::AppSpec;
 use crate::window::{AnyHost, WakeEvent};
 use crate::{ConfiguredOverlay, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions, OverlayPlacement, OverlaySupport};
 
+#[path = "overlay_requests.rs"]
+mod requests;
+use requests::{Requests, Update};
+
 /// The screen edge an overlay sits on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScreenEdge {
@@ -71,8 +75,6 @@ pub enum Availability {
     Unavailable,
 }
 
-type Update<T> = Box<dyn FnOnce(&mut T, &mut Tx) -> bool + Send>;
-
 /// Where an overlay sits and how big it is, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Placement {
@@ -81,31 +83,6 @@ pub(crate) struct Placement {
     pub margin: f32,
     pub align: Align,
     pub inset: f32,
-}
-
-struct Requests<T> {
-    input: Option<OverlayInput>,
-    follow_pointer: Option<bool>,
-    placement: Option<Option<OverlayPlacement>>,
-    display: Option<DisplayTarget>,
-    request_keys: bool,
-    visible: Option<bool>,
-    edge: Option<ScreenEdge>,
-    margin: Option<f32>,
-    align: Option<(Align, f32)>,
-    size: Option<(f32, f32)>,
-    /// How long the `visible` change fades the window's alpha (macOS).
-    fade: Option<Duration>,
-    macos_level: Option<isize>,
-    /// The `setup` waker fired.
-    woken: bool,
-    updates: Vec<Update<T>>,
-}
-
-impl<T> Default for Requests<T> {
-    fn default() -> Self {
-        Requests { input: None, follow_pointer: None, placement: None, display: None, request_keys: false, visible: None, edge: None, margin: None, align: None, size: None, fade: None, macos_level: None, woken: false, updates: Vec::new() }
-    }
 }
 
 struct Shared<T> {
@@ -156,6 +133,8 @@ impl<T: 'static> OverlayHandle<T> {
     /// Result of the native capture-exclusion request. Linux reports Unsupported.
     pub fn capture_exclusion(&self) -> OverlaySupport { self.capabilities().capture_exclusion }
     pub fn capabilities(&self) -> crate::OverlayCapabilities { self.shared.native.lock().unwrap().1 }
+    /// Changes `OverlayOptions::exclude_from_capture` on the live window, shown or not.
+    pub fn set_exclude_from_capture(&self, exclude: bool) { self.request(|q| q.exclude_from_capture = Some(exclude)); }
 
     /// The overlay's frame counts: redraws, presents, failed drawable acquisitions, loop turns
     /// and pacing: current totals, and per-second rates updated once a second while it draws.
@@ -1260,6 +1239,7 @@ impl<T: 'static> Overlay<T> {
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
         if let Some(input) = requests.input { self.pending_input = Some(input); }
         self.apply_input();
+        if let Some(exclude) = requests.exclude_from_capture { self.set_capture_exclusion(exclude); }
         if let Some(follow) = requests.follow_pointer {
             self.options.follow_pointer = follow;
             #[cfg(target_os = "macos")]

@@ -110,6 +110,7 @@ pub struct OverlayOptions {
     pub follow_pointer: bool,
     pub level: OverlayLevel,
     /// Native best effort, not a security boundary. Use the window number in capture filters.
+    /// `OverlayHandle::set_exclude_from_capture` changes it later.
     pub exclude_from_capture: bool,
     pub keys: KeyPolicy,
     pub input: OverlayInput,

@@ -109,6 +109,12 @@ impl OverlayWindow {
         Some(Self { input, observing: false, exclusion, watch: None, wake })
     }
     pub fn capture_exclusion(&self) -> OverlaySupport { self.exclusion }
+    pub fn set_capture_exclusion(&mut self, exclude: bool) -> OverlaySupport {
+        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        let applied = unsafe { SetWindowDisplayAffinity(self.input.hwnd, affinity) } != 0;
+        self.exclusion = match (exclude, applied) { (true, true) => OverlaySupport::Requested, (true, false) => OverlaySupport::Failed, (false, _) => OverlaySupport::Unknown };
+        self.exclusion
+    }
     pub fn global_pointer(&self) -> OverlaySupport {
         if self.input.track() && self.watch.as_ref().is_none_or(|w| !w.supported()) { OverlaySupport::Failed }
         else { OverlaySupport::Supported }

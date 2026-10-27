@@ -593,7 +593,7 @@ pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::
 fn configure_native(window: &NSWindow, options: &crate::MacWindowOptions) {
     if let Some(shadow) = options.shadow { window.setHasShadow(shadow); }
     if let Some(level) = options.level { window.setLevel(level); }
-    // SAFETY: all callers are native creation paths on the AppKit main thread.
+    // SAFETY: every caller runs on the AppKit main thread.
     unsafe {
         if let Some(bits) = options.collection_behavior {
             let _: () = msg_send![window, setCollectionBehavior: bits];
@@ -619,6 +619,7 @@ pub(crate) struct Panel {
     monitors: RefCell<Option<MouseMonitors>>,
     pointer: Rc<PointerState>,
     options: OverlayOptions,
+    exclude_from_capture: Cell<bool>,
     follow_pointer: Cell<bool>,
     visible: Cell<bool>,
     pointer_poll: Cell<Option<Instant>>,
@@ -714,7 +715,7 @@ impl Panel {
             return None;
         }
         panel.setDelegate(unsafe { ns_window.delegate() }.as_deref());
-        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, revealing, fade: Rc::default(), wake, panel, window: ns_window, view })
+        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), exclude_from_capture: Cell::new(options.exclude_from_capture), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, revealing, fade: Rc::default(), wake, panel, window: ns_window, view })
     }
 
     /// On the primary screen (the one with the menu bar), in AppKit's bottom-left coordinates.
@@ -850,7 +851,13 @@ impl Panel {
 
     pub fn window_number(&self) -> u32 { unsafe { self.panel.windowNumber() as u32 } }
     pub fn capture_exclusion(&self) -> OverlaySupport {
-        if self.options.exclude_from_capture { OverlaySupport::Requested } else { OverlaySupport::Unknown }
+        if self.exclude_from_capture.get() { OverlaySupport::Requested } else { OverlaySupport::Unknown }
+    }
+    /// `sharingType` none, or read-only so recorders see the panel again.
+    pub fn set_capture_exclusion(&self, exclude: bool) -> OverlaySupport {
+        self.exclude_from_capture.set(exclude);
+        configure_native(&self.panel, &crate::MacWindowOptions::default().exclude_from_capture(exclude));
+        self.capture_exclusion()
     }
     pub fn global_pointer(&self) -> OverlaySupport {
         if (self.follow_pointer.get() || self.pointer.input.get() == OverlayInput::Regions)
