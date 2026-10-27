@@ -102,8 +102,8 @@ class WatchTests(unittest.TestCase):
 
 class ArgumentTests(unittest.TestCase):
     def test_examples_keep_their_old_command_lines(self):
-        opts = dev.parse(["opencode", "--scene", "session", "--snap-on-patch", "a.png"])
-        self.assertEqual((opts.example, opts.app_args), ("opencode", ["--scene", "session", "--snap-on-patch", "a.png"]))
+        opts = dev.parse(["settings", "--scene", "session", "--snap-on-patch", "a.png"])
+        self.assertEqual((opts.example, opts.app_args), ("settings", ["--scene", "session", "--snap-on-patch", "a.png"]))
         self.assertEqual(dev.parse(["settings", "--", "--port", "1"]).port, 18744, "after -- every flag is the app's")
 
     def test_external_crates_name_their_patchable_files(self):

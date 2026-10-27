@@ -2,9 +2,9 @@
 """Repeatable offscreen workloads; build and run on a headless GPU worker.
 
 Frame-CPU mode:
-  cargo build --profile perf -p settings -p opencode --bins --example frame-cpu --features frame-profile
+  cargo build --profile perf -p settings --bins --features frame-profile
   python3 scripts/bench-ui.py --frame-cpu --out target/frame-cpu --runs 9
-Save the baseline binaries (including examples/frame-cpu) in saved/target/perf,
+Save the baseline binaries in saved/target/perf,
 then build the candidate and add --compare saved/target/perf. Use separate Cargo
 target directories for separate source roots. Comparison verifies binary hashes
 differ, discards one warmup per side, and alternates paired runs; report medians
@@ -39,46 +39,11 @@ a = p.parse_args()
 if a.runs < 1:
     p.error('--runs must be positive')
 a.out.mkdir(parents=True, exist_ok=True)
-fixture = json.loads((ROOT / 'examples/opencode/assets/fixture.json').read_text())
-sid = fixture['open']
-history = []
-for i in range(2000 - len(fixture['messages'][sid])):
-    msg = {'id': f'msg_history{i:06}', 'type': 'user',
-           'text': f'Synthetic message {i}: check the reconnect path and preserve the sidebar state.',
-           'time': {'created': fixture['now'] - 10000000 + i}}
-    if i % 2:
-        msg.update(type='assistant', content=[{'type': 'text', 'text': msg.pop('text')}])
-        msg['time']['completed'] = msg['time']['created'] + 1
-    history.append(msg)
-fixture['messages'][sid] = history + fixture['messages'][sid]
-long = a.out.resolve() / 'long.json'
-long.write_text(json.dumps(fixture))
-f = ['--fixture', 'examples/opencode/assets/fixture.json']
 workloads = {
-    'stream': ('opencode', f + ['--scene', 'streaming', '--frames', '1440']),
-    'scroll': ('opencode', f + ['--scene', 'session', '--script', 'examples/opencode/scripts/scroll.json', '--frames', '480']),
-    'switch': ('opencode', f + ['--script', 'examples/opencode/scripts/switch.json', '--frames', '1080']),
     'settings': ('settings', ['--script', 'examples/settings/scripts/bench.json', '--frames', '360']),
-    'long-stream': ('opencode', ['--fixture', str(long), '--scene', 'streaming', '--frames', '1440']),
-    'long-scroll': ('opencode', ['--fixture', str(long), '--scene', 'session', '--script', 'examples/opencode/scripts/scroll.json', '--frames', '480']),
 }
 if a.frame_cpu:
-    hover = a.out.resolve() / 'hover.json'
-    hover.write_text(json.dumps({'events': [
-        {'t': i / 120, 'type': 'move', 'x': 120, 'y': 40 + (i % 22) * 28}
-        for i in range(1, 480)]}))
-    scroll = a.out.resolve() / 'dense-scroll.json'
-    scroll.write_text(json.dumps({'events': [
-        {'t': 0.01, 'type': 'scroll', 'x': 200, 'y': 300, 'dy': -10000, 'dur': 3.9}]}))
-    workloads.update({
-        'idle': ('examples/frame-cpu', ['--scene', 'idle', '--frames', '480']),
-        'spring': ('examples/frame-cpu', ['--scene', 'spring', '--frames', '480']),
-        'hover': ('examples/frame-cpu', ['--script', str(hover), '--frames', '480']),
-        'dense-scroll': ('examples/frame-cpu', ['--script', str(scroll), '--frames', '480']),
-        'markdown-every-frame': ('examples/frame-cpu', ['--scene', 'stream', '--frames', '480']),
-        'resize': ('examples/frame-cpu', ['--scene', 'resize', '--frames', '240']),
-        'startup': ('settings', ['--first-pixels', '--frames', '1']),
-    })
+    workloads['startup'] = ('settings', ['--first-pixels', '--frames', '1'])
 rx = re.compile(r'gpu init ([\d.]+) ms, first frame ([\d.]+) ms, frame cpu mean ([\d.]+) ms p50 ([\d.]+) p95 ([\d.]+) max ([\d.]+), (\d+) instances')
 names = ['gpu_ms', 'first_ms', 'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'instances']
 result = {}

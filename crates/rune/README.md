@@ -334,7 +334,7 @@ policy changes are applied in the same mutation phase.
   20 ms down to 5.5 ms as a backlog builds.
 - **Settling** (`Tx::settle()`): no animation, every track lands, and removed nodes unmount at once.
   Opening a session lands at the bottom on its first frame with nothing animating in.
-- **Turn actions**: the OpenCode example reserves a stable tail and crossfades Working into the
+- **Turn actions**: a transcript view can reserve a stable tail and crossfades Working into the
   Desktop copy icon over .34 s, without removing and re-adding the tail's height. `Tx::copy(text)`
   requests a shell clipboard write. Requests follow handler order; headless runs never write the
   system clipboard.
@@ -1814,17 +1814,7 @@ Which blur a frosted panel needs depends on what sits behind it:
 ```sh
 cargo build --release -p settings
 target/release/settings                       # the window
-
-cargo build --release -p opencode
-target/release/opencode                       # live, read-only, when an OpenCode server answers at 127.0.0.1:4096
-F=(--fixture examples/opencode/assets/fixture.json)
-target/release/opencode $F --scene streaming --snap out.png   # scenes: home session streaming draft sidebar-closed status
-target/release/opencode $F --script examples/opencode/scripts/switch.json --frames 540 --out frames/
 ```
-
-The OpenCode example takes `--server URL`, `--session <id or title words>`, `--edge NAME`,
-`--no-stream` and `--reduced-motion`. It sends prompts only to a fixture's scripted reply, or to a
-non-default server with `--allow-send`.
 
 ### Linux
 
@@ -1972,7 +1962,7 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 - **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
   readback).
 - **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
-  Build `target/perf/settings` and `target/perf/opencode` with `--profile perf`. Then `python3 scripts/bench-startup.py --out perf/startup` times
+  Build `target/perf/settings` with `--profile perf`. Then `python3 scripts/bench-startup.py --out perf/startup` times
   fresh process launch to that marker (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
    This measures process-cold startup with warm OS/driver caches, not physical display presentation.
 - **Trace quality**: `python3 scripts/trace-quality.py run.jsonl` reports scene-edge error against
@@ -2004,8 +1994,6 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 
 ```sh
 scripts/rune-dev settings -- --snap-on-patch perf/live-edit/settings.png --hot-control perf/live-edit/control.json
-# Or the fixture-only OpenCode example:
-scripts/rune-dev opencode -- --scene session --snap-on-patch perf/live-edit/opencode.png
 ```
 
 Edit a view function and the existing process rebuilds its keyed tree. Scroll offsets,
@@ -2075,8 +2063,7 @@ Source edits here are relayed to the build Mac as before.
 ### Compatible edits and restart boundaries
 
 The launcher validates Rust syntax, then copies compatible edits into a private compiler
-mirror. It accepts function-body changes in Settings' `main.rs`, and OpenCode's
-`view.rs` and `palette.rs`. Use stable keys to preserve node identity.
+mirror. It accepts function-body changes in Settings' `main.rs`. Use stable keys to preserve node identity.
 
 **Restart needed** is printed before publishing changes to state/type declarations,
 function signatures, imports, constants, const-fn bodies, impl methods, startup code, dependencies,
@@ -2126,7 +2113,7 @@ Each line above is a separate file replacement. `pause` freezes the virtual cloc
 patches. `{"id":5}` requests a fresh snapshot.
 
 Over ten edits per example, spring positions and velocities stay exact. Median
-save-to-GPU time is about 8 s for Settings and 21 s for OpenCode, short of the
+save-to-GPU time is about 8 s for Settings, short of the
 one-second target.
 
 ## Measured (Apple silicon, headless at 2×)
@@ -2139,9 +2126,6 @@ one-second target.
   takes 1.4 ms (glyph rasterisation) and GPU init about 11 ms. There are 174 instances, drawn in
   one draw call.
 - **Motion linting**: the internal motion linter finds 0 candidates in that trace.
-- **OpenCode example**: while streaming, frame CPU is about 0.25 ms at p50 and 0.5 ms at p95, with
-  about 1,100 instances in one draw call. At rest the window draws nothing. The first frame takes
-  4–7 ms. The internal motion linter finds 0 candidates in the stream, switch, send and scroll traces.
 
 ## Differences from PLAN.md
 

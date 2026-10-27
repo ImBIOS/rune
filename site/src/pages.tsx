@@ -108,12 +108,12 @@ const buildable: { title: string; text: ReactNode; status: Status; meta: string;
     title: "Desktop apps on macOS",
     text: (
       <>
-        Windows drawn entirely by Rune through winit and wgpu. The Settings window, a gallery of OpenCode's components
-        and OpenCode Desktop's home and session pages (from a fixture, or read-only from a live server) run today.
+        Windows drawn entirely by Rune through winit and wgpu. The Settings window and a gallery of OpenCode's
+        components run today.
       </>
     ),
     status: "works",
-    meta: "examples/opencode",
+    meta: "examples/settings",
   },
   {
     title: "Windows and Linux",
@@ -336,10 +336,6 @@ export function HomeView() {
           <figure className="shot">
             <img src={withBase("/shots/settings.png")} alt="A dark Settings window with theme, accent, toggle and slider rows" width={1240} height={1040} loading="lazy" />
             <figcaption>examples/settings, rendered headless</figcaption>
-          </figure>
-          <figure className="shot">
-            <img src={withBase("/shots/opencode-session.png")} alt="OpenCode Desktop's session page: a project sidebar, a transcript with code, and the composer" width={1600} height={1025} loading="lazy" />
-            <figcaption>examples/opencode, session page from the fixture</figcaption>
           </figure>
         </div>
       </section>

@@ -13,7 +13,6 @@ members = [
     "examples/web-hello",
     "examples/todo",
     "examples/settings",
-    "examples/opencode",
     "examples/kit-gallery",
     "examples/background",
     "examples/live-values",

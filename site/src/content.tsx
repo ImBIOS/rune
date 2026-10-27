@@ -51,7 +51,6 @@ export const principles: Entry[] = [
     code: [
       at("crates/rune-motion/src/tokens.rs", "the motion palette"),
       at("crates/rune-motion/src/transition.rs", "exits before unmount"),
-      at("scripts/check-ui.py", "motion gates"),
     ],
   },
   {
@@ -112,7 +111,6 @@ export const principles: Entry[] = [
     spec: [{ label: "Render", values: [<code>--snap out.png --at 0.25</code>], mono: true }],
     code: [
       at("crates/rune/src/tooling.rs", "--snap, --scene, --script, --trace"),
-      at("scripts/check-ui.py", "snapshot gates"),
     ],
   },
   {

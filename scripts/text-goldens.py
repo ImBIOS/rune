@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refresh text-affected stills, reusing the committed Storybook reference columns.
 
-Run after building settings, opencode and kit-gallery in release mode. No browser.
+Run after building settings and kit-gallery in release mode. No browser.
 Historical motion strips are separate captures; this updates only named stills.
 """
 import importlib.util
@@ -25,15 +25,6 @@ def snap(binary, path, *args):
                    cwd=ROOT, check=True, capture_output=True)
 
 
-fixture = ['--fixture', 'examples/opencode/assets/fixture.json']
-for name, args in {
-    'home': ['--scene', 'home'],
-    'session-bottom': ['--scene', 'session'],
-    'session-light': ['--scene', 'session', '--theme', 'light'],
-    'session-top': ['--scene', 'session', '--script', 'examples/opencode/scripts/scroll.json', '--at', '3'],
-    'streaming': ['--scene', 'streaming', '--at', '4'],
-}.items():
-    snap('opencode', ROOT / f'demo/opencode/{name}.png', *fixture, *args)
 snap('settings', ROOT / 'demo/settings-dark.png', '--theme', 'dark')
 snap('settings', ROOT / 'demo/settings-light.png', '--scene', 'light')
 

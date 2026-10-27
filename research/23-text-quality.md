@@ -228,7 +228,7 @@ strips/videos retain their recorded states and are not current text goldens.
 mkdir -p .lab-output/text/target/perf
 cargo test -p rune quality_tests
 cargo test -p rune --test alloc
-cargo build --profile perf -p opencode -p settings -p kit-gallery
+cargo build --profile perf -p settings -p kit-gallery   # (the OpenCode fixture example has since moved out of this repository)
 cargo build --release -p rune --example text_quality
 swiftc -O scripts/coretext-quality.swift -o .lab-output/text/coretext-quality
 cp target/perf/{opencode,settings,kit-gallery} .lab-output/text/target/perf/

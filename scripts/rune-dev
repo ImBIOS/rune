@@ -4,7 +4,7 @@
 On the desk Mac this relays source edits to the build Mac; on a worker it watches a validated mirror.
 Only view function bodies can patch. All other build inputs require a restart.
 
-  rune-dev settings|opencode [-- APP ARGS]
+  rune-dev settings [-- APP ARGS]
   rune-dev --manifest-path APP/Cargo.toml --patch 'src/ui/*.rs' [--bin B] [--features F] [-- APP ARGS]
 
 --desk compiles on the build Mac but runs the app on this Mac, patching it over an SSH tunnel.
@@ -31,7 +31,7 @@ import tomllib
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = {"settings": {"examples/settings/src/main.rs"}, "opencode": {"examples/opencode/src/view.rs", "examples/opencode/src/palette.rs"}}
+EXAMPLES = {"settings": {"examples/settings/src/main.rs"}}
 # Matches the workspace's [profile.rune-hot], for apps that don't define their own.
 PROFILE = ['profile.rune-hot.inherits="dev"', "profile.rune-hot.debug=0", "profile.rune-hot.incremental=true",
            "profile.rune-hot.package.png.opt-level=3", "profile.rune-hot.package.fdeflate.opt-level=3"]
@@ -403,11 +403,6 @@ def app_argv(opts, root):
             i = app_args.index(flag) + 1
             if i == len(app_args): opts.parser.error(flag + " needs a path")
             app_args[i] = str((root / app_args[i]).resolve())
-    if opts.example == "opencode":
-        if any(x in app_args for x in ("--live", "--server", "--allow-send")):
-            opts.parser.error("OpenCode live editing is fixture-only")
-        if "--fixture" not in app_args:
-            app_args += ["--fixture", str(ROOT / "examples/opencode/assets/fixture.json")]
     return (["--hot"] if opts.example else []) + app_args
 
 

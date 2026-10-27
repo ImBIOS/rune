@@ -30,3 +30,9 @@ required-features = ["markdown", "frame-profile"]
 [dev-dependencies]
 # Reference rasteriser for the built-in glyphs (tests/glyphs.rs).
 resvg = { version = "0.45", default-features = false }
+# The fixture goldens render with the OpenCode theme's tokens and fonts (tests/markdown_fixture.rs).
+rune-theme-opencode = { path = "../../themes/opencode" }
+
+[[test]]
+name = "markdown_fixture"
+required-features = ["markdown", "mermaid"]

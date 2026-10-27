@@ -1,8 +1,0 @@
-{
-  "events": [
-    { "t": 0.4, "type": "tap", "key": "r-ses_fx0001aaaaaaaaaaaaaaaaaa" },
-    { "t": 4.6, "type": "tap", "key": "t-ses_fx0003aaaaaaaaaaaaaaaaaa" },
-    { "t": 5.8, "type": "tap", "key": "t-ses_fx0004aaaaaaaaaaaaaaaaaa" },
-    { "t": 7.0, "type": "tap", "key": "t-ses_fx0001aaaaaaaaaaaaaaaaaa" }
-  ]
-}
