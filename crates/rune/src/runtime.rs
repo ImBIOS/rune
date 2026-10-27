@@ -142,6 +142,8 @@ mod window_requests;
 #[path = "runtime/action.rs"]
 mod action;
 use action::*;
+#[path = "runtime/paint_slots.rs"]
+mod paint_slots;
 use props::*;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
@@ -6573,29 +6575,9 @@ impl<S: 'static> Runtime<S> {
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
                 }
-                if let Some((bleed, backdrop)) = n.vis.effect {
-                    let slot = Instance {
-                        rect: [r[0], r[1], w, h],
-                        radii,
-                        fill: [0.0, 0.0, 0.0, 1.0],
-                        border: [0.0; 4],
-                        params: [if backdrop { 1.0 } else { 0.0 }, KIND_EFFECT, bleed * k_px, k_px],
-                        uv: [0.0; 4],
-                        clip,
-                        fade: crate::render::pack_fade(fade, clip, clip),
-                    };
-                    // A compositor paints whatever it likes at a slot, so a faded slot gets its
-                    // own layer that applies the opacity, instead of a factor it could forget.
-                    if o < 1.0 {
-                        let mut marker = Instance::begin_layer(slot.rect, clip, crate::render::LayerSpec { opacity: o, ..Default::default() });
-                        marker.fade = slot.fade;
-                        self.instances.push(marker);
-                        faded_slot = Some(self.instances.len());
-                        self.instances.push(Instance { clip: NO_CLIP, ..slot });
-                        self.instances.push(Instance::end_layer());
-                    } else {
-                        self.instances.push(slot);
-                    }
+                if let Some(effect) = n.vis.effect {
+                    let fade = crate::render::pack_fade(fade, clip, clip);
+                    faded_slot = paint_slots::push_effect(&mut self.instances, effect, ([r[0], r[1], w, h], radii, clip, fade), k_px, o);
                 }
                 let focus_ring = if default_ring == Some(i) { Some(self.default_focus_ring()) }
                     else { self.focus_ring_visible(i).then_some(n.focus.ring).flatten() };
