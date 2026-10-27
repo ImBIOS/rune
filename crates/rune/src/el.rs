@@ -1093,9 +1093,9 @@ pub(crate) type PillStyleFn = Rc<dyn Fn(&str) -> PillStyle>;
 /// `PillStyle::default().bg(..).icon(..)`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PillStyle {
-    bg: Option<Color>,
-    fg: Option<Color>,
-    icon: Option<&'static crate::Icon>,
+    pub(crate) bg: Option<Color>,
+    pub(crate) fg: Option<Color>,
+    pub(crate) icon: Option<&'static crate::Icon>,
 }
 
 impl PillStyle {
@@ -2788,7 +2788,7 @@ impl El {
             inp.decorations = spans;
             self.sync_input_rich();
         } else if let Some(t) = &mut self.text {
-            t.spans = crate::text::flatten_spans(&spans);
+            t.spans = crate::el_pills::with_pill_colors(&spans, &t.pills);
         }
         self
     }
