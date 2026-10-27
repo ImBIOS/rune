@@ -13,7 +13,11 @@ fn digits_switch_a_storys_variant_and_r_remakes_the_one_its_on() {
     let mut rt = runtime_with(lab_variants(), Some(Some("Pressed".into())), true);
     assert_eq!(shows(&rt, "lab"), "ticks 0 presses 5", "a story with variants starts on its first");
     assert!(find(&rt, "playground-variant-0").is_some() && find(&rt, "playground-variant-1").is_some(), "the side column lists them");
-    assert_eq!(shows(&rt, "playground-hint"), "↑↓ stories · 1–2 variants · → triggers · Esc back");
+    assert_eq!(shows(&rt, "playground-hint").replace('\u{a0}', " "), "↑↓ stories · 1–2 variants · → triggers · Esc back");
+    let (hint, side) = (find(&rt, "playground-hint").unwrap().rect, find(&rt, "playground-side").unwrap().rect);
+    let (one_line, line) = rt.text.measure(&shows(&rt, "playground-hint"), crate::tok::type_::SECTION, 1.0);
+    assert!(hint[0] + hint[2] <= side[0] + side[2], "{hint:?} in {side:?}");
+    assert!(one_line <= hint[2] - 8.0 || hint[3] > 1.5 * line, "a hint too long for one line wraps: {one_line} wide, {hint:?}");
     let all = rt.elements();
     let caps: Vec<_> = all.iter().filter(|e| e.parent.is_some_and(|p| all[p].key.as_deref() == Some("cap"))).filter_map(|e| e.text.clone()).collect();
     assert_eq!(caps, ["1", "2", "R", "X"], "each variant's and trigger's key, by its row");

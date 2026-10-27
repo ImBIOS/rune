@@ -185,19 +185,20 @@ impl<S: 'static> Live<S> {
                         .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(request.clone()))
                 }))
         });
+        // No-break spaces keep each part whole when the hint wraps.
         let hint = [
-            Some("↑↓ stories".to_owned()),
-            match variants.len().min(9) { 0 => None, 1 => Some("1 variant".into()), n => Some(format!("1–{n} variants")) },
-            (!triggers.is_empty()).then(|| "→ triggers".into()),
-            Some("Esc back".into()),
-        ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            Some("↑↓\u{a0}stories".to_owned()),
+            match variants.len().min(9) { 0 => None, 1 => Some("1\u{a0}variant".into()), n => Some(format!("1–{n}\u{a0}variants")) },
+            (!triggers.is_empty()).then(|| "→\u{a0}triggers".into()),
+            Some("Esc\u{a0}back".into()),
+        ].into_iter().flatten().collect::<Vec<_>>().join("\u{a0}· ");
         col().key("playground-side").w(SIDE).h(height).px(12.0).pt(12.0).pb(12.0).gap(12.0)
             .children(title)
             .children(slot)
             .children(picker)
             .children(card)
             .child(spacer())
-            .child(text(hint).key("playground-hint").font(type_::SECTION).color(t.text_secondary).px(4.0))
+            .child(text(hint).key("playground-hint").font(type_::SECTION).color(t.text_secondary).px(4.0).wrap())
     }
 
     /// The app's controls for the open story, from `Playground::side` or `Story::side`, acting
