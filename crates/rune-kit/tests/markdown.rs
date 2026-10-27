@@ -357,6 +357,38 @@ fn table_options_drop_the_outline_dim_the_header_and_line_up_figures() {
     }
 }
 
+#[test]
+fn table_header_takes_its_own_rule_fill_and_weight() {
+    fn styled(src: &String, _: &mut Cx<String>) -> El {
+        let [rule, head] = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+        let style = MarkdownStyle::neutral(true)
+            .table_outline(None)
+            .table_rules(rule)
+            .table_header_rule(head)
+            .table_header_fill(rune::Color::TRANSPARENT)
+            .table_header_weight(500.0);
+        col().w_full().child(Markdown::new(src.clone()).render(&style))
+    }
+    fn strong(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(true).table_outline(None)))
+    }
+    let [rule, head] = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+    let src = "| A header wider than the narrowest column | Count |\n|---|--:|\n| a | 1 |\n| b | 2 |\n";
+    // The first column is as wide as its widest cell, the header.
+    let width = |rt: &Runtime<String>| rt.elements().into_iter().find(|e| e.path.ends_with("th/c0")).unwrap().rect[2];
+    let mut plain = Runtime::new(src.to_owned(), strong, (900.0, 400.0), Env::new(true, 1.0));
+    plain.frame(0.0);
+    let mut rt = Runtime::new(src.to_owned(), styled, (900.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!([by_key(&rt, "s0").fill, by_key(&rt, "s1").fill, by_key(&rt, "s-end").fill], [head, rule, rule]);
+    assert_eq!(by_key(&rt, "th").fill, rune::Color::TRANSPARENT);
+    assert!(width(&rt) < width(&plain), "a medium header is narrower than the strong default");
+
+    let mut empty = Runtime::new("| Name |\n|---|\n".to_owned(), styled, (480.0, 400.0), Env::new(true, 1.0));
+    empty.frame(0.0);
+    assert_eq!(by_key(&empty, "s-end").fill, head, "with no rows the closing rule is the header's");
+}
+
 /// A web table's look: cells a step smaller than the body, padded 10 by 4, the first column
 /// flush with the paragraph above.
 #[test]

@@ -1119,6 +1119,8 @@ pub struct MarkdownStyle {
     table_rule: Color,
     table_head_fill: Color,
     table_head_text: Color,
+    table_head_rule: Option<Color>,
+    table_head_weight: Option<f32>,
     table_min_column: f32,
     table_tabular: bool,
     /// Cells' font before tabular figures and the header's weight (`None`: the body's).
@@ -1208,6 +1210,8 @@ impl MarkdownStyle {
             table_rule: c.border_muted,
             table_head_fill: c.layer_01,
             table_head_text: c.text_base,
+            table_head_rule: None,
+            table_head_weight: None,
             table_min_column: 120.0,
             table_tabular: true,
             table_font: None,
@@ -1350,6 +1354,24 @@ impl MarkdownStyle {
     /// The header row's text colour (the body text colour by default).
     pub fn table_header_text(mut self, c: Color) -> Self {
         self.table_head_text = c;
+        self
+    }
+    /// The header row's fill alone (`table` sets it with the border).
+    pub fn table_header_fill(mut self, c: Color) -> Self {
+        self.table_head_fill = c;
+        self
+    }
+    /// The hairline under the header row, when it should stand out from the row rules, as a
+    /// web `th { border-bottom }` in a stronger colour than the `td`s'. The row rule colour
+    /// by default.
+    pub fn table_header_rule(mut self, c: Color) -> Self {
+        self.table_head_rule = Some(c);
+        self
+    }
+    /// The header row's weight (the strong weight by default), for a medium-weight `th` beside
+    /// bold `strong` text.
+    pub fn table_header_weight(mut self, w: f32) -> Self {
+        self.table_head_weight = Some(w);
         self
     }
     /// Whether cells set figures at one width (OpenType `tnum`) so numbers line up down a

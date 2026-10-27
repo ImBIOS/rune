@@ -42,7 +42,7 @@ fn with_tnum(features: &'static str) -> &'static str {
 
 impl Renderer {
     fn head_font(&self) -> TextStyle {
-        self.cell_font(TextStyle { weight: self.s.strong_weight, ..self.s.table_font.unwrap_or(self.s.body) })
+        self.cell_font(TextStyle { weight: self.s.table_head_weight.unwrap_or(self.s.strong_weight), ..self.s.table_font.unwrap_or(self.s.body) })
     }
 
     fn body_font(&self) -> TextStyle {
@@ -76,10 +76,13 @@ impl Renderer {
         let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
         for (i, cells) in t.rows.iter().enumerate() {
             let rmap = row_maps.get(i).map_or(&[][..], Vec::as_slice);
-            frame = frame.child(rule(format!("s{i}"))).child(self.table_row(cells, rmap, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
+            let sep = rule(format!("s{i}"));
+            let sep = match s.table_head_rule { Some(c) if i == 0 => sep.fill(c), _ => sep };
+            frame = frame.child(sep).child(self.table_row(cells, rmap, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
         }
         if s.table_outline.is_none() {
-            frame = frame.child(rule("s-end".into()));
+            let end = rule("s-end".into());
+            frame = frame.child(match s.table_head_rule { Some(c) if t.rows.is_empty() => end.fill(c), _ => end });
         }
         if self.scroll_wide {
             // Every column at its natural width, scrolling when the table is wider than the text.
