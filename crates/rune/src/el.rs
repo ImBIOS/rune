@@ -55,6 +55,7 @@ pub struct Tx {
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
+    pub(crate) title: Option<String>,
     pub(crate) open_urls: Vec<String>,
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
@@ -191,6 +192,13 @@ impl Tx {
     /// A close or quit asked in the same change wins.
     pub fn minimize(&mut self) {
         self.minimize = true;
+    }
+
+    /// Set this window's title after this handler, in its title bar and the Window menu. The
+    /// window starts with `AppSpec`'s title and keeps the last one set when it's closed and
+    /// opened again. Headless `--tree` output shows it as `"title"`. An overlay has no title.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = Some(title.into());
     }
 
     /// Open `url` in the system's default handler once this handler's frame is done: a browser

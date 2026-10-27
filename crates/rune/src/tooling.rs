@@ -140,6 +140,7 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     let mut rt = Runtime::with_text(state, spec.view, size, env, text);
     rt.poll = spec.poll;
     rt.on_key = spec.on_key;
+    rt.window_title.start(spec.title);
     rt.set_live_waker(waker.clone());
     #[cfg(feature = "hot")]
     if crate::hot::enabled() {
@@ -1297,6 +1298,7 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
     });
     if let Some(menu) = rt.popup_json() { tree["popupMenu"] = menu; }
     if let Some(dialog) = rt.file_dialog_json() { tree["fileDialog"] = dialog; }
+    if let Some(title) = rt.window_title.current() { tree["title"] = title.into(); }
     if let Some((text, rect)) = rt.help_tooltip() { tree["tooltip"] = json!({ "text": text, "rect": rect.map(r2) }); }
     tree
 }

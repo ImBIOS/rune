@@ -485,6 +485,9 @@ app.run();
 - Handlers ask the shell with `Tx::close_window()`, `Tx::minimize()` and `Tx::quit()` (quit wins,
   and either wins over minimize). Minimize does nothing for a hidden window, a panel, a launcher,
   an overlay, a borderless window or a window that can't minimize (debug builds say so).
+- `Tx::set_title("Draft — Notes")` sets the window's title from a handler or `update`. The window
+  opens with `AppSpec`'s title, keeps the last one set when it closes and opens again, and headless
+  `--tree` output shows it as `"title"`.
 - The `Runtime` (state, scene, text, scroll offsets) belongs to the app, so a reopened window
   shows the same UI, settled on its first frame. The GPU device and renderer stay too, unless
   `release_gpu_when_closed` (then closing destroys the window and device everywhere).

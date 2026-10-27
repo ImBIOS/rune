@@ -1,5 +1,5 @@
 //! What handlers and updates ask of the window itself, carried out by `Host::shell`:
-//! minimizing it.
+//! minimizing it and showing the title they set.
 use super::*;
 
 fn minimize_ignored(what: &str) {
@@ -23,5 +23,11 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         { w.prime = 0; }
         w.window.set_minimized(true);
+    }
+
+    /// `Tx::set_title`: shows a title set since the window last showed one, hidden or covered
+    /// as it may be. A window created later opens with the current title (`try_create`).
+    pub(super) fn show_title(&mut self) {
+        if let Some(title) = self.rt.window_title.take_change() && let Some(w) = &self.win { w.window.set_title(title); }
     }
 }

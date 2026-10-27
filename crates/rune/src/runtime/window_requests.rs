@@ -1,6 +1,28 @@
 //! What a commit asks of the window besides its pixels: the content height a window that
-//! fits its content asks for (`App::fit_content_height`).
+//! fits its content asks for (`App::fit_content_height`), and the title (`Tx::set_title`).
 use super::*;
+
+/// The window's title: `AppSpec`'s until a handler sets another, and whether the window has
+/// yet to show the last one set.
+#[derive(Debug, Default)]
+pub(crate) struct Title { now: Option<String>, changed: bool }
+
+impl Title {
+    /// The title the window opens with, before any handler sets one.
+    pub(crate) fn start(&mut self, title: &str) {
+        if self.now.is_none() { self.now = Some(title.to_owned()); }
+    }
+    pub(super) fn set(&mut self, title: String) {
+        if self.now.as_deref() == Some(title.as_str()) { return; }
+        self.now = Some(title);
+        self.changed = true;
+    }
+    pub(crate) fn current(&self) -> Option<&str> { self.now.as_deref() }
+    /// A title set since the window last took one, for the window to show.
+    pub(crate) fn take_change(&mut self) -> Option<&str> {
+        if std::mem::take(&mut self.changed) { self.now.as_deref() } else { None }
+    }
+}
 
 impl<S: 'static> Runtime<S> {
     /// Asks the window for the content's new height, on this commit's spring. The first

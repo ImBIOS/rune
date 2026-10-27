@@ -2092,6 +2092,7 @@ impl<S: 'static> Host<S> {
     /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`, then
     /// opens the pop-up menu it asked for, if the window is still there to open it over.
     fn shell(&mut self, event_loop: &ActiveEventLoop) {
+        self.show_title();
         for _ in 0..8 {
             let minimize = std::mem::take(&mut self.rt.minimize_request);
             match self.rt.shell_request.take() {
@@ -2294,7 +2295,7 @@ impl<S: 'static> Host<S> {
         let launcher = self.launcher();
         let visible = !launcher && (self.started || self.options.visible);
         #[allow(unused_mut)]
-        let mut attrs = self.options.attributes(self.spec.title, size, self.spec.min_size, visible).with_active(focus);
+        let mut attrs = self.options.attributes(self.rt.window_title.current().unwrap_or(self.spec.title), size, self.spec.min_size, visible).with_active(focus);
         #[cfg(target_os = "macos")]
         if self.macos_window.nonactivating_panel { attrs = attrs.with_visible(false).with_active(false); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]

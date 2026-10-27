@@ -897,3 +897,24 @@ fn trace_all_names_unkeyed_elements_and_reports_what_animated() {
     let tk = all[2]["tk"].as_array().unwrap();
     assert!(tk.iter().any(|t| t[0] == child["id"] && t[1] == "frame" && t[2] == 1), "{tk:?}");
 }
+
+#[test]
+fn the_window_title_starts_from_the_spec_and_follows_set_title() {
+    fn view(_: &u32, _: &mut Cx<u32>) -> El {
+        crate::el().size(100.0, 100.0).on_press_tx(|n: &mut u32, tx| { *n += 1; tx.set_title(format!("Notes {}", *n % 2)); })
+    }
+    let spec = AppSpec::new("Notes", (100.0, 100.0), || 0, view);
+    let mut rt = runtime_for(&spec, 0, (100.0, 100.0), Env { scale: 1.0, system_dark: true }, std::sync::Arc::new(|| {}));
+    rt.frame(0.0);
+    assert_eq!(tree_json(&rt, 0.0)["title"], "Notes");
+    assert_eq!(rt.window_title.take_change(), None, "the window opens with the spec's title");
+    let press = |rt: &mut Runtime<u32>, t| { rt.pointer_down(50.0, 50.0); rt.pointer_up(50.0, 50.0); rt.frame(t); };
+    press(&mut rt, 0.1);
+    assert_eq!(tree_json(&rt, 0.1)["title"], "Notes 1");
+    assert_eq!(rt.window_title.take_change(), Some("Notes 1"));
+    assert_eq!(rt.window_title.take_change(), None);
+    rt.update(|_, tx| tx.set_title("Notes 1"));
+    assert_eq!(rt.window_title.take_change(), None, "the same title again is no change");
+    assert!(!rt.update_if(|_, tx| { tx.set_title("Draft"); false }), "the shell shows a title without a frame");
+    assert_eq!(rt.window_title.take_change(), Some("Draft"));
+}

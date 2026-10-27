@@ -1270,6 +1270,8 @@ pub struct Runtime<S: 'static> {
     next_file_dialog: u64,
     /// A frame change for the window (`Tx::resize_window`), with its spring resolved.
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
+    /// The window's title (`Tx::set_title`), from `AppSpec`'s.
+    pub(crate) window_title: window_requests::Title,
     /// The window's height follows the root's natural height (`App::fit_content_height`).
     pub(crate) fit_height: bool,
     /// The content height last asked of the window.
@@ -1592,6 +1594,7 @@ impl<S: 'static> Runtime<S> {
             file_dialog_answers: Vec::new(),
             next_file_dialog: 0,
             window_frame: None,
+            window_title: Default::default(),
             fit_height: false,
             fit_asked: None,
             fit_hold: false,
@@ -1929,6 +1932,7 @@ impl<S: 'static> Runtime<S> {
             // An explicit blur is not the temporary pointer-down blur of a scrim.
             self.last_focused = None;
         }
+        if let Some(title) = tx.title.take() { self.window_title.set(title); }
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
             self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
@@ -8015,6 +8019,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
     tx.minimize |= one.minimize;
+    if one.title.is_some() { tx.title = one.title; }
     tx.playground.extend(one.playground);
     tx.open_urls.extend(one.open_urls);
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
