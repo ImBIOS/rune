@@ -29,10 +29,12 @@ mod case;
 #[cfg(all(test, target_os = "macos"))]
 mod core_text_tests;
 mod fallback;
+mod ink;
 mod measure;
 mod svg_path;
 mod trak;
 pub use case::TextCase;
+pub use ink::{TextInk, ink};
 pub use measure::measure;
 pub(crate) use case::Source as CaseSource;
 

@@ -47,6 +47,14 @@ pub(super) fn note_fonts(fonts: &[&'static [u8]], families: (&str, &str)) {
 /// The first call on a thread loads the fonts (a few milliseconds); later calls cost a hash
 /// lookup when the same text was measured recently, or one shaping pass when not.
 pub fn measure(text: &str, spans: &[Span], style: TextStyle, max_width: Option<f32>) -> (f32, f32) {
+    with_text(|t| {
+        let l = t.layout_rich(text, spans, style, 1.0, max_width);
+        (l.full_width().ceil(), super::layout_height(&l, style, 1.0))
+    })
+}
+
+/// Runs `f` on this thread's text system, built from the fonts the app was given.
+pub(super) fn with_text<R>(f: impl FnOnce(&mut TextSystem) -> R) -> R {
     let generation = || FONTS.lock().ok().and_then(|f| f.as_ref().map(|f| f.generation)).unwrap_or(0);
     MEASURER.with_borrow_mut(|m| {
         let current = generation();
@@ -64,8 +72,7 @@ pub fn measure(text: &str, spans: &[Span], style: TextStyle, max_width: Option<f
         if m.calls % EVICT_EVERY == 0 {
             m.text.end_commit();
         }
-        let l = m.text.layout_rich(text, spans, style, 1.0, max_width);
-        (l.full_width().ceil(), super::layout_height(&l, style, 1.0))
+        f(&mut m.text)
     })
 }
 
