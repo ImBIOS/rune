@@ -345,7 +345,11 @@ impl Scene {
         self.store.now()
     }
     pub fn set_pixel_scale(&mut self, s: f32) {
+        let previous = self.store.pixel_scale();
         self.store.set_pixel_scale(s);
+        if self.store.pixel_scale() != previous {
+            for node in self.nodes.iter_mut().filter(|n| n.alive) { node.dirty = true; }
+        }
     }
     pub fn set_reduced_motion(&mut self, on: bool) {
         self.store.set_reduced_motion(on);

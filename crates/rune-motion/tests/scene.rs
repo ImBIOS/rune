@@ -4,6 +4,26 @@ use rune_motion::{MotionTrace, Phase, SMALL_SCALE_FLOOR, TraceHeader, flags};
 const HZ: f64 = 120.0;
 
 #[test]
+fn pixel_scale_resnaps_settled_nodes_without_retargeting() {
+    let make = |scale| {
+        let mut scene = Scene::new();
+        scene.set_pixel_scale(scale);
+        scene.insert(NodeId(1), spec(0.123, 0.137, 30.123, 20.137), Mount::Initial);
+        scene.frame_at(0.0);
+        scene
+    };
+    let mut scene = make(1.0);
+    for scale in [2.0, 1.5, 1.0] {
+        scene.set_pixel_scale(scale);
+        assert_eq!(scene.frame_at(0.0).changed.len(), 1, "scale changes invalidate settled poses");
+        let fresh = make(scale);
+        assert_eq!(scene.presented(NodeId(1)).unwrap().rect, fresh.presented(NodeId(1)).unwrap().rect);
+        scene.set_pixel_scale(scale);
+        assert!(scene.frame_at(0.0).changed.is_empty(), "an unchanged scale does no work");
+    }
+}
+
+#[test]
 fn instant_frame_lands_an_unchanged_target_mid_flight() {
     let mut s = Scene::new();
     let id = NodeId(1);
