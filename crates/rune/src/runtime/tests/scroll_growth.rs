@@ -431,3 +431,81 @@ fn a_shrink_glide_never_reports_far_from_the_end_it_heads_for() {
     for _ in 0..120 { rt.frame(1.0 / 120.0); }
     assert_eq!(rt.state.1, [false], "gliding to the new end stays near");
 }
+
+/// The glide lands on the new end before the rows' last fraction of a point has collapsed.
+/// The reader sticks there without the presented end lifting it: the offset never steps up.
+#[test]
+fn a_reader_stuck_in_the_collapse_tail_never_steps_up() {
+    let top = |rt: &Runtime<usize>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap().rect[1];
+    let mut rt = reading(120.0);
+    rt.update(|n, _| *n = 15);
+    let (mut offset, mut y) = (rt.scrolls.values().next().unwrap().offset, top(&rt));
+    let mut stuck_in_tail = false;
+    for f in 0..240 {
+        rt.frame(1.0 / 120.0);
+        let st = rt.scrolls.values().next().unwrap();
+        stuck_in_tail |= st.pinned && st.max > 1200.0;
+        assert!(st.offset <= offset, "frame {f}: the offset steps up from {offset} to {}", st.offset);
+        let now = top(&rt);
+        assert!(now >= y - 1e-3, "frame {f}: the rows step up from {y} to {now}");
+        (offset, y) = (st.offset, now);
+    }
+    assert!(stuck_in_tail, "the reader sticks while the rows still collapse");
+    assert_eq!(offset, 1200.0);
+}
+
+/// `n` rows of 100 pt and a last row `tall` pt high in a 300 pt `stick_bottom` viewport, which
+/// records `on_far_from_bottom`.
+fn far_reader(s: &(usize, f32, Vec<bool>), _: &mut Cx<(usize, f32, Vec<bool>)>) -> El {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+    for i in 0..s.0 {
+        stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
+    }
+    if s.1 > 0.0 { stack = stack.child(el().key("tall").h(s.1).w_full()); }
+    let scroll = col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true })
+        .on_far_from_bottom(300.0, |s: &mut (usize, f32, Vec<bool>), far| s.2.push(far));
+    col().key("root").child(scroll.child(stack))
+}
+
+/// `far_reader` scrolled `up` from its end.
+fn far_reading(rows: usize, tall: f32, up: f32) -> Runtime<(usize, f32, Vec<bool>)> {
+    let mut rt = Runtime::new((rows, tall, Vec::new()), far_reader, (200.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.frame(1.0 / 120.0);
+    rt.wheel(100.0, 100.0, up);
+    for _ in 0..30 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.state.2.last(), Some(&true), "{up} above the end is far");
+    rt.state.2.clear();
+    rt
+}
+
+/// A short glide lands on the new end long before a tall row has collapsed: the reader is near
+/// the layout's end, and isn't reported far again while the presented end catches up.
+#[test]
+fn a_landed_glide_over_a_collapsing_tall_row_stays_near() {
+    let mut rt = far_reading(10, 3000.0, 2800.0);
+    rt.update(|s, _| s.1 = 0.0);
+    for _ in 0..360 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.scrolls.values().next().unwrap().offset, 700.0, "the glide lands on the new end");
+    assert_eq!(rt.state.2, [false], "a tall row collapsing under a landed glide stays near");
+}
+
+/// Rows coming back partway end a shrink glide short of the presented end: the reader is near
+/// the regrown layout's end, and isn't reported far while the other rows collapse to it.
+#[test]
+fn rows_regrowing_under_a_shrink_glide_stay_near() {
+    let mut rt = far_reading(20, 0.0, 600.0);
+    rt.update(|s, _| s.0 = 5);
+    for f in 0.. {
+        rt.frame(1.0 / 120.0);
+        let st = rt.scrolls.values().next().unwrap();
+        assert!(st.glide.is_some() && f < 120, "the glide passes 850");
+        if st.offset < 850.0 { break; }
+    }
+    rt.update(|s, _| s.0 = 12);
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scrolls.values().next().unwrap().glide.is_none(), "rows coming back past the offset end the glide");
+    for _ in 0..240 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.state.2, [false], "the regrown end is near, while the rows still collapse to it");
+}

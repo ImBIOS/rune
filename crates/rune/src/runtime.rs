@@ -416,6 +416,8 @@ pub(crate) struct Node {
     static_scale: f32,
     /// `P_SCALE` has a track: paint reads the sprung factor.
     scale_track: bool,
+    /// `P_GROUP_REST` fades a dropped `El::group_opacity` to full: paint reads it until it lands.
+    group_fade: bool,
     /// `El::time_scale`: this element's own factor; the scene multiplies ancestors' in.
     time_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
@@ -883,6 +885,8 @@ struct ScrollState {
     shrink_cut: bool,
     /// Where a glide goes, when not to the bottom.
     glide_to: Option<f64>,
+    /// The growth stack's layout end while its rows still move (see `ease_to_shrunk_end`).
+    laid: Option<f64>,
     /// At-bottom state last sent to `El::on_at_bottom`.
     at_bottom: Option<bool>,
     /// State last sent to `El::on_far_from_bottom`.
@@ -2550,6 +2554,7 @@ impl<S: 'static> Runtime<S> {
         if !out.exited.is_empty() {
             self.prune_exited();
         }
+        self.land_group_fades();
         if !self.flying.is_empty() {
             let scene = &self.scene;
             let before = self.flying.len();
@@ -4381,8 +4386,7 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             let rest_quiet = instant || !was_present || was_exiting || self.reduced_motion;
-            let motion = nodes[i].opacity_motion;
-            self.set_group_rest(id, &mut nodes[i].vis.group_opacity, motion, spring_l, rest_quiet);
+            nodes[i].group_fade = self.set_group_rest(id, nodes[i].vis.group_opacity, nodes[i].opacity_motion, spring_l, rest_quiet);
             let k = nodes[i].static_scale;
             nodes[i].scale_track = k != 1.0 || self.scene.store().has(id, P_SCALE);
             if nodes[i].scale_track {
@@ -4537,6 +4541,7 @@ impl<S: 'static> Runtime<S> {
                     shrink_glide: false,
                     shrink_cut: false,
                     glide_to: None,
+                    laid: None,
                     at_bottom: None,
                     far_from_bottom: None,
                     held: false,
@@ -4846,7 +4851,8 @@ impl<S: 'static> Runtime<S> {
             st.direct = false;
             st.max = overflow.max(0.0);
             if st.pinned && sp.stick_bottom {
-                st.offset = st.max;
+                // A reader stuck on a shrinking stack's end doesn't rise with its rows' last fraction.
+                st.offset = laid.filter(|&end| st.offset <= end + 1e-6).map_or(st.max, |end| st.max.min(end));
                 st.v = 0.0;
                 st.glide = None;
             } else if st.glide.is_some() {
@@ -4872,6 +4878,7 @@ impl<S: 'static> Runtime<S> {
             if sp.stick_bottom && !held && !shrinking && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }
+            st.laid = laid;
             if sp.stick_bottom && axes.y() && slack_dt > 0.0 { moving |= self.step_slack(i, slack_dt); }
         }
         moving
@@ -5864,7 +5871,7 @@ impl<S: 'static> Runtime<S> {
         let flying = !self.flying.is_empty();
         let tree_order = ((flying || self.has_sticky || self.has_raise) && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
-            self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
+            self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some() || n.group_fade
                 || fades(n.looping)
                 || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0 || p.transform.rotate.abs() > 1e-6))
         });

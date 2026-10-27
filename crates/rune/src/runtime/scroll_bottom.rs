@@ -149,10 +149,12 @@ impl<S: 'static> Runtime<S> {
         // stack's own bottom padding and border.
         let pad = self.stacks.get(&self.nodes[c].id).map_or(0.0, |s| (s.pad_bottom - self.nodes[c].inset[3]).max(0.0));
         let short = f64::from(n.target[3] - (self.nodes[c].target[3] - pad));
+        // Stuck on a shrinking stack's end: the rows' last fraction collapses under it (see `step_scroll`).
+        let end = st.laid.filter(|&end| st.offset <= end + 1e-6).unwrap_or(f64::INFINITY);
         if st.held && (short <= 0.5 || lag - short >= -0.5) {
-            Some(self.scroll_overflow(i) + lag)
+            Some(self.scroll_overflow(i).min(end) + lag)
         } else if st.max > 0.0 {
-            Some((st.max + lag).max(0.0))
+            Some((st.max.min(end) + lag).max(0.0))
         } else {
             None
         }
@@ -255,8 +257,8 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             if let Some((min, _)) = &n.on_far_from_bottom {
-                // A shrink glide heads for the new end; the presented one is still collapsing.
-                let end = if st.shrink_glide { st.glide_to.map_or(st.max, |to| to.min(st.max)) } else { st.max };
+                // Rows collapsing measure from the end they head for, glide or not.
+                let end = st.laid.map_or(st.max, |end| end.min(st.max));
                 let far = end - st.offset > f64::from(min.max(n.local.h));
                 if st.far_from_bottom != Some(far) {
                     st.far_from_bottom = Some(far);

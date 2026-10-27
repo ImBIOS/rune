@@ -78,19 +78,20 @@ pub(super) fn paint_pose_springing(store: &rune_motion::AnimationStore, id: Node
 pub(super) const STATIC_SCALE_SETTLE: f64 = 0.1;
 
 impl<S: 'static> Runtime<S> {
-    /// Moves node `id`'s group-opacity rest to its `group` rest on its opacity motion (the
-    /// transaction's spring without one), or lands it when `quiet`: an instant change, a mount,
-    /// reduced motion. No group opacity draws at full, so an element that takes one on or drops
-    /// it fades from or to 1; one still fading to full keeps `group` at `[1, 1]` until it lands.
-    pub(super) fn set_group_rest(&mut self, id: NodeId, group: &mut Option<[f32; 2]>, motion: Option<Anim>, spring: Spring, quiet: bool) {
+    /// Moves node `id`'s group-opacity rest to `group`'s on its opacity motion (the
+    /// transaction's spring without one), or lands it when `quiet`: an instant change or motion,
+    /// a mount, reduced motion. No group opacity draws at full, so an element that takes one on
+    /// or drops it fades from or to 1. Returns whether a dropped one is still fading to full.
+    pub(super) fn set_group_rest(&mut self, id: NodeId, group: Option<[f32; 2]>, motion: Option<Anim>, spring: Spring, quiet: bool) -> bool {
         let store = self.scene.store();
         let had = store.has(id, P_GROUP_REST);
+        let motion = motion.unwrap_or(spring.into());
+        let quiet = quiet || matches!(motion.curve, rune_motion::Curve::Instant);
         let settled = !store.is_animating(id, P_GROUP_REST) && store.get(id, P_GROUP_REST) == Some(1.0);
         let to = group.map_or(1.0, |g| g[0]);
-        let motion = motion.unwrap_or(spring.into());
         if group.is_none() && (!had || quiet || settled) {
             if had { self.scene.store_mut().remove(id, P_GROUP_REST); }
-            return;
+            return false;
         }
         if quiet {
             self.scene.set(id, P_GROUP_REST, to);
@@ -100,12 +101,32 @@ impl<S: 'static> Runtime<S> {
         } else if store.target(id, P_GROUP_REST) != Some(to) {
             self.scene.animate(id, P_GROUP_REST, to, motion);
         }
-        group.get_or_insert([1.0, 1.0]);
+        group.is_none()
+    }
+
+    /// Drops the rest track of each dropped group opacity whose fade to full landed this frame.
+    pub(super) fn land_group_fades(&mut self) {
+        let landed: Vec<usize> = self.scene.store().events().iter()
+            .filter_map(|e| match *e {
+                rune_motion::MotionEvent::Settled { node, prop, .. } if prop == P_GROUP_REST.id => self.node_index.get(&node).copied(),
+                _ => None,
+            })
+            .filter(|&i| self.nodes[i].group_fade && !self.scene.store().is_animating(self.nodes[i].id, P_GROUP_REST))
+            .collect();
+        for i in landed {
+            self.nodes[i].group_fade = false;
+            self.scene.store_mut().remove(self.nodes[i].id, P_GROUP_REST);
+        }
     }
 
     /// The opacity factor `El::group_opacity` gives node `n` under a hover group at `group`.
+    /// A dropped one fading to full shows at full under the hover.
     pub(super) fn group_factor(&self, n: &Node, group: f32) -> f32 {
-        let Some([rest, hovered]) = n.vis.group_opacity else { return 1.0 };
+        let [rest, hovered] = match n.vis.group_opacity {
+            Some(g) => g,
+            None if n.group_fade => [1.0, 1.0],
+            None => return 1.0,
+        };
         let rest = self.scene.get(n.id, P_GROUP_REST).unwrap_or(rest);
         rest + (hovered - rest) * group
     }

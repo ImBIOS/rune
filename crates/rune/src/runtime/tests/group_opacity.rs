@@ -113,3 +113,34 @@ fn adding_or_dropping_group_opacity_fades() {
     }
     assert!(!rt.animating);
 }
+
+/// A dropped group opacity's fade to full leaves nothing behind once it lands, with no further
+/// commit: no rest track, nothing that paints the row in tree order. An instant opacity motion
+/// drops it at once.
+#[test]
+fn a_dropped_group_opacity_leaves_nothing_once_it_lands() {
+    fn view(s: &(bool, bool), _: &mut Cx<(bool, bool)>) -> El {
+        let mut act = el().key("act").size(10.0, 10.0).fill(Color::WHITE);
+        if s.0 { act = act.group_opacity(0.0, 1.0); }
+        if s.1 { act = act.opacity_motion(Anim::INSTANT); }
+        col().size(200.0, 100.0).child(crate::row().key("row").size(200.0, 40.0).hover_group().child(act))
+    }
+    let left = |rt: &Runtime<(bool, bool)>| {
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("act")).unwrap();
+        (n.vis.group_opacity, rt.scene.store().has(n.id, P_GROUP_REST), n.group_fade)
+    };
+    let mut rt = Runtime::new((true, false), view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.0 = false);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(left(&rt), (None, true, true), "the fade to full runs");
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
+    assert!(!rt.animating);
+    assert_eq!(left(&rt), (None, false, false), "and leaves nothing once it lands");
+
+    rt.update(|s, _| *s = (true, true));
+    rt.frame(1.0 / 120.0);
+    rt.update(|s, _| s.0 = false);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(left(&rt), (None, false, false), "an instant motion drops it at once");
+}

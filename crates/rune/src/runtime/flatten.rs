@@ -281,6 +281,7 @@ pub(super) fn flatten(
         press_scale,
         static_scale,
         scale_track: false,
+        group_fade: false,
         time_scale,
         pixel_aspect,
         aspect_fit,
