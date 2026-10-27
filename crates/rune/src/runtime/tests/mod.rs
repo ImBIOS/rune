@@ -1,0 +1,24 @@
+use super::*;
+use crate::PointerPress;
+use crate::el::{col, el};
+
+mod input_clipboard;
+mod layout_rows;
+mod loop_sleep;
+mod picture_scale;
+mod pointer_drag;
+mod pointer_hit;
+mod scroll_growth;
+mod secure_text;
+mod springs;
+mod window_wake;
+
+thread_local! {
+    /// Runs once inside the next frame, after layout and just before live values latch: a
+    /// publication from another thread landing at the worst moment.
+    pub(super) static MID_FRAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
+    col().children([el().key("card"), el().key("card")])
+}
