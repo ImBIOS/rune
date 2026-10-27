@@ -15,7 +15,7 @@ impl<S: 'static> Live<S> {
         };
         if in_side {
             match ev.key {
-                Key::Tab | Key::Escape => return Nav::OutOfSide,
+                Key::Tab | Key::Escape | Key::Left => return Nav::OutOfSide,
                 Key::Up if !m.cmd => return Nav::SideStep(-1),
                 Key::Down if !m.cmd => return Nav::SideStep(1),
                 _ => {}

@@ -146,7 +146,7 @@ impl<X> Stage<X> {
 /// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
 /// toggles it, as a click on it does; groups stay folded until the playground closes. R
 /// replays the story from the start, a trigger's letter runs it, → or Tab move into the side
-/// column (↑↓ inside it, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
+/// column (↑↓ inside it, ←, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
 /// before the stage's `AppSpec::on_key`, except Esc, which the stage gets first. A focused
 /// text field keeps all its keys, and so does an element focused in the stage, until Esc.
 pub struct Playground<S: 'static> {

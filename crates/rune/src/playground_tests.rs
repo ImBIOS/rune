@@ -307,7 +307,7 @@ fn a_replay_runs_its_steps_on_the_logical_clock_the_same_every_time() {
 }
 
 #[test]
-fn right_goes_into_the_side_column_and_tab_comes_back() {
+fn right_goes_into_the_side_column_and_tab_or_left_comes_back() {
     let mut rt = runtime(Some(Some("Fade".into())));
     press(&mut rt, Key::Right);
     assert_eq!(focused(&rt).as_deref(), Some("playground-trigger-r"));
@@ -319,6 +319,9 @@ fn right_goes_into_the_side_column_and_tab_comes_back() {
     assert_eq!(selected(&rt), 5, "J doesn't leave the story from the side column");
     press(&mut rt, Key::Tab);
     assert_eq!(focused(&rt), None);
+    press(&mut rt, Key::Right);
+    press(&mut rt, Key::Left);
+    assert_eq!((focused(&rt), selected(&rt)), (None, 5), "← comes back too, to the same story");
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     assert_eq!(selected(&rt), 3);

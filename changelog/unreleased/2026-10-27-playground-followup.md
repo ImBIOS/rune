@@ -1,1 +1,1 @@
-- **Playground: folding groups.** A click on a group's header folds or unfolds it, and so do ←, → and ↵ while the header is the list's selection. ↑↓ walk headers and the stories that show; J K skip the headers. Groups stay folded until the playground closes.
+- **Playground: folding groups.** A click on a group's header folds or unfolds it, and so do ←, → and ↵ while the header is the list's selection. ↑↓ walk headers and the stories that show; J K skip the headers. Groups stay folded until the playground closes. ← leaves the side column, as Tab and Esc do.
