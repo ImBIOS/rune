@@ -246,13 +246,6 @@ impl Win {
         if focus { self.window.focus_window(); }
     }
 
-    /// The runtime's cursor while the pointer is in the window, the arrow once it leaves.
-    /// `Hidden` needs focus, so it can't outlive the window being active.
-    fn apply_cursor<S>(&mut self, rt: &Runtime<S>, focused: bool) {
-        let want = match rt.cursor() { crate::el::Cursor::Hidden if !focused => crate::el::Cursor::Default, c => c };
-        self.cursor.apply(&self.window, want, rt.pointer().is_some());
-    }
-
     fn hide(&self) {
         #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
         crate::file_dialog::window_focus(&self.window, false);

@@ -10,5 +10,5 @@ crates/rune/src/overlay.rs 1963
 crates/rune/src/runtime.rs 8191
 crates/rune/src/text.rs 3151
 crates/rune/src/tooling.rs 1973
-crates/rune/src/window.rs 3407
+crates/rune/src/window.rs 3400
 examples/kit-gallery/src/stories.rs 1618

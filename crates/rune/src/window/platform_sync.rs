@@ -26,3 +26,12 @@ pub(super) fn sync_platform<S: 'static>(l: &mut Win, rt: &mut Runtime<S>, secure
         );
     }
 }
+
+impl Win {
+    /// The runtime's cursor while the pointer is in the window, the arrow once it leaves.
+    /// `Hidden` needs focus, so it can't outlive the window being active.
+    pub(super) fn apply_cursor<S>(&mut self, rt: &Runtime<S>, focused: bool) {
+        let want = match rt.cursor() { crate::el::Cursor::Hidden if !focused => crate::el::Cursor::Default, c => c };
+        self.cursor.apply(&self.window, want, rt.pointer().is_some());
+    }
+}
