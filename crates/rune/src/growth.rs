@@ -110,13 +110,15 @@ pub struct GrowTrack {
     /// Presented feather height (points).
     pub mask: f32,
     pub streaming: bool,
+    /// `El::arrives_whole`: no speed limits, only the spring.
+    pub whole: bool,
     /// Commit spring duration floor (`Tx::motion`), so a slower transaction (`REFLOW`) slows the row too.
     pub(crate) duration: f32,
 }
 
 impl GrowTrack {
     pub fn settled(h: f32) -> GrowTrack {
-        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false, duration: 0.0 }
+        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false, whole: false, duration: 0.0 }
     }
 
     pub fn moving(&self) -> bool {
@@ -140,6 +142,14 @@ impl GrowTrack {
         if rem.abs() <= 1.0 / 128.0 && self.v.abs() < 0.5 {
             self.h = self.target;
             self.v = 0.0;
+        } else if self.whole {
+            // Content that arrived complete has nothing to read as it opens: one critically
+            // damped glide on the spring, however far, which a pinned viewport follows.
+            let (x, v) = spring.sample(self.h, self.v, self.target, dt);
+            let landed = (rem >= 0.0 && x >= self.target) || (rem <= 0.0 && x <= self.target);
+            self.h = if landed { self.target } else { x };
+            self.v = if landed { 0.0 } else { v };
+            self.age += dt;
         } else {
             let (x, _v) = spring.sample(self.h, self.v, self.target, dt);
             let mut cap = if rem.abs() > caps::LONG_DISTANCE { caps::MAX_LONG } else { caps::MAX };
@@ -226,6 +236,29 @@ mod tests {
             prev = h;
         }
         assert!((r.last().unwrap().1 - 900.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_whole_row_glides_on_the_spring_alone() {
+        let mut t = GrowTrack { whole: true, ..GrowTrack::settled(0.0) };
+        t.retarget(900.0);
+        let (mut prev, mut speeds) = (0.0, Vec::new());
+        for _ in 0..120 {
+            for _ in 0..2 {
+                t.step(GROWTH, &edge::FEATHER, true);
+            }
+            assert!(t.h >= prev - 1e-4 && t.h <= 900.0, "monotone, no overshoot: {}", t.h);
+            speeds.push(t.h - prev);
+            prev = t.h;
+        }
+        let at = |s: f32| speeds.iter().take((s * 120.0) as usize).sum::<f32>();
+        assert!(at(0.5) > 0.98 * 900.0, "past the capped speed: {} pt in 0.5 s", at(0.5));
+        assert!(!t.moving(), "settled within a second");
+        // One glide: speed rises, then falls, once.
+        let peak = speeds.iter().enumerate().fold((0, 0.0), |m, (i, &v)| if v > m.1 { (i, v) } else { m }).0;
+        assert!(speeds[..=peak].windows(2).all(|w| w[1] >= w[0] - 1e-3), "{speeds:?}");
+        // (The settle snap closes the last 1/128 pt.)
+        assert!(speeds[peak..].windows(2).all(|w| w[1] <= w[0] + 1.0 / 128.0), "{speeds:?}");
     }
 
     #[test]

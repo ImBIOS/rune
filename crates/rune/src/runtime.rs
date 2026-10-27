@@ -438,6 +438,7 @@ pub(crate) struct Node {
     scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
+    whole: bool,
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
@@ -4296,6 +4297,7 @@ impl<S: 'static> Runtime<S> {
                 stack.closing.remove(&id);
                 stack.tops.insert(id, nodes[j].target[1] - ctop);
                 let streaming = nodes[j].streaming;
+                let whole = nodes[j].whole && !streaming;
                 let g_moving = self.grows.get(&id).is_some_and(|g| g.moving()) || stack.pending_heights.contains_key(&id);
                 let entering = revealed_now && reader && !self.grows.contains_key(&id);
                 let row_reading = (reading && !(revealing && g_moving)) || entering;
@@ -4313,12 +4315,13 @@ impl<S: 'static> Runtime<S> {
                 }
                 let duration = tx.motion.map_or(0.0, |m| m.duration * 1.15);
                 let g = self.grows.entry(id).or_insert_with(|| {
-                    if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, duration, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
+                    if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, whole, duration, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
                 });
                 g.streaming = streaming;
+                g.whole = whole;
                 let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
                 if tx.settle || !existed || first || self.reduced_motion || snap_change || row_reading {
-                    *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
+                    *g = GrowTrack { streaming, whole, ..GrowTrack::settled(h) };
                     stack.pending_heights.remove(&id);
                 } else {
                     // Only a width/scale rewrap may shrink an active streaming row, including
@@ -8933,6 +8936,7 @@ fn flatten(
         scroll_edges,
         growth,
         streaming,
+        whole,
         input,
         cursor,
         window_drag,
@@ -9039,6 +9043,7 @@ fn flatten(
         scroll_edges,
         growth,
         streaming,
+        whole,
         input,
         cursor,
         window_drag,

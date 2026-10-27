@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::arrives_whole()`: a growth-stack row whose content arrives complete glides on the growth
+  spring alone.** Such a row (a sent message, a finished reply loaded at once) skips the speed
+  limits that pace streaming text, so a large insert, and a pinned viewport following it, moves in
+  one critically damped glide instead of a long capped climb. Rows without it are unchanged; a row
+  that is also `streaming(true)` keeps the limits.
+
 - **`Tx::open_url`, `El::mx`/`El::my` and `rune::prefs::Prefs`.** `Tx::open_url(url)` opens
   `http:`, `https:` and `mailto:` links in the system handler on macOS (`NSWorkspace`), Windows
   (`ShellExecuteW`) and Linux (`xdg-open`), as `web::open_url` already did; other schemes
