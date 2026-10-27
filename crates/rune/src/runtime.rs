@@ -66,7 +66,7 @@ pub(crate) fn handler_state_ref<S: 'static>(state: &S) -> &dyn Any {
 }
 
 #[cfg(debug_assertions)]
-#[path = "layout_diagnostics.rs"]
+#[path = "runtime/layout_diagnostics.rs"]
 mod layout_diagnostics;
 
 #[path = "focus.rs"]
@@ -83,11 +83,11 @@ mod popup_dispatch;
 mod file_dialog_dispatch;
 #[path = "drop_dispatch.rs"]
 mod drop_dispatch;
-#[path = "scroll_bottom.rs"]
+#[path = "runtime/scroll_bottom.rs"]
 mod scroll_bottom;
-#[path = "caret.rs"]
+#[path = "runtime/caret.rs"]
 mod caret;
-#[path = "layout_read.rs"]
+#[path = "runtime/layout_read.rs"]
 mod layout_read;
 #[path = "links.rs"]
 mod links;
@@ -95,44 +95,44 @@ mod links;
 mod selectable;
 #[path = "help.rs"]
 mod help;
-#[path = "scroll_edge.rs"]
+#[path = "runtime/scroll_edge.rs"]
 mod scroll_edge;
-#[path = "scroll_x.rs"]
+#[path = "runtime/scroll_x.rs"]
 mod scroll_x;
-#[path = "scroll_offset.rs"]
+#[path = "runtime/scroll_offset.rs"]
 mod scroll_offset;
-#[path = "sticky.rs"]
+#[path = "runtime/sticky.rs"]
 mod sticky;
 #[path = "gesture_dispatch.rs"]
 mod gesture_dispatch;
-#[path = "flights.rs"]
+#[path = "runtime/flights.rs"]
 mod flights;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
 pub use selectable::{SelectedText, SelectionChange, TextSelection};
 #[cfg(test)]
-#[path = "truncate_tests.rs"]
+#[path = "runtime/truncate_tests.rs"]
 mod truncate_tests;
 #[cfg(test)]
-#[path = "line_clamp_tests.rs"]
+#[path = "runtime/line_clamp_tests.rs"]
 mod line_clamp_tests;
 #[cfg(test)]
-#[path = "aspect_fit_tests.rs"]
+#[path = "runtime/aspect_fit_tests.rs"]
 mod aspect_fit_tests;
 #[cfg(test)]
 #[path = "drop_tests.rs"]
 mod drop_tests;
 #[cfg(test)]
-#[path = "on_key_tests.rs"]
+#[path = "runtime/on_key_tests.rs"]
 mod on_key_tests;
 #[cfg(test)]
 #[path = "live_only_tests.rs"]
 mod live_only_tests;
 #[cfg(test)]
-#[path = "selection_api_tests.rs"]
+#[path = "runtime/selection_api_tests.rs"]
 mod selection_api_tests;
 #[cfg(test)]
-#[path = "anchored_grow_tests.rs"]
+#[path = "runtime/anchored_grow_tests.rs"]
 mod anchored_grow_tests;
 
 /// Seconds after a commit before debug builds check a `Tx::live_only` event (`skip_view`).
@@ -218,7 +218,7 @@ const CLICK_SLOP: f32 = 4.0;
 const SCROLL_DECAY: f32 = 2.002;
 
 #[cfg(any(test, target_arch = "wasm32"))]
-#[path = "web_runtime.rs"]
+#[path = "runtime/web_runtime.rs"]
 pub(crate) mod web_runtime;
 
 #[derive(Clone, Copy, Debug)]
