@@ -125,8 +125,10 @@ pub mod prop {
     pub const SCROLL: Prop<Vec2> = Prop::builtin(9, PropClass::Gesture);
     /// Presence progress: 0 absent, 1 present. Driven by the scene.
     pub const PRESENCE: Prop<f32> = Prop::builtin(10, PropClass::Presence);
-    /// Screen-space travel progress (x, y) for matched geometry and `Travel::Screen`.
-    pub const TRAVEL: Prop<Vec2> = Prop::builtin(11, PropClass::Spatial);
+    /// Screen-space travel progress (x, y) for matched geometry and `Travel::Screen`. A
+    /// fraction of the path, so it settles like a scale: a point-sized threshold would end a
+    /// long flight a few points short and snap.
+    pub const TRAVEL: Prop<Vec2> = Prop::builtin(11, PropClass::Scale);
 
     /// Number of built-in property ids (the scene caches these per node).
     pub const BUILTIN_COUNT: usize = 12;

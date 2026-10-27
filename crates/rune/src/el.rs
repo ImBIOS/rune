@@ -37,6 +37,8 @@ pub struct Tx {
     pub(crate) pick_reads: Vec<PickRead>,
     pub(crate) clear_secret: bool,
     pub(crate) text_flights: Vec<(String, String)>,
+    /// `Tx::launch`: (source, destination).
+    pub(crate) launches: Vec<(String, String)>,
     /// Rows to reveal: (scope, key).
     pub(crate) scroll_to: Vec<(Option<String>, String)>,
     /// Scroll viewports to send to their bottom: (key, animated).
@@ -152,7 +154,7 @@ impl Tx {
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
         !self.pick_reads.is_empty() || !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
-            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty()
+            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty() || !self.launches.is_empty()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -254,15 +256,6 @@ impl Tx {
     /// waits about a frame (60 Hz), so a poll that keeps asking never spins the loop.
     pub fn wake_after(&mut self, duration: std::time::Duration) {
         self.wakes.push(duration);
-    }
-
-    /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
-    /// The runtime captures the previous presentation and measures the live destination each
-    /// frame, after row growth and scroll. Either side is a key unique in the view, or a key
-    /// path such as `"msg-42/body"`: the `body` text whose nearest keyed ancestor is `msg-42`,
-    /// so every row can reuse the same local keys.
-    pub fn fly_text(&mut self, source: impl Into<String>, destination: impl Into<String>) {
-        self.text_flights.push((source.into(), destination.into()));
     }
 
     /// Request a clipboard write from the shell after this handler finishes.

@@ -1,10 +1,34 @@
-//! A text handoff in screen coordinates. The destination is measured after growth and scroll
+//! `Tx::fly_text` and `Tx::launch` requests, and the text handoff in screen coordinates. The destination is measured after growth and scroll
 //! each frame. One analytic growth-spring progress interpolates source to live destination,
 //! so the copy joins the bubble without a second spring lagging behind scroll follow.
 
 use rune_motion::{Animated, PropClass, Rect};
 use crate::growth::GROWTH;
 use crate::render::Instance;
+use crate::Tx;
+
+impl Tx {
+    /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
+    /// The runtime captures the previous presentation and measures the live destination each
+    /// frame, after row growth and scroll. Either side is a key unique in the view, or a key
+    /// path such as `"msg-42/body"`: the `body` text whose nearest keyed ancestor is `msg-42`,
+    /// so every row can reuse the same local keys.
+    pub fn fly_text(&mut self, source: impl Into<String>, destination: impl Into<String>) {
+        self.text_flights.push((source.into(), destination.into()));
+    }
+
+    /// Launch an element that mounts in this commit from where another element's text shows,
+    /// as a sent message leaves its composer. The element keyed `destination` starts with its
+    /// first text on `source`'s text, at its own size, and travels one straight screen path to
+    /// its place on the `tok::motion::REFLOW` spring (or the commit's [`Tx::motion`]). Until it
+    /// lands it draws above the whole window and outside every clip, so it can rise out of a
+    /// panel into a scroll view; the source can clear in the same commit. Keys and key paths
+    /// work as in [`Tx::fly_text`]. Under Reduce Motion, or when the destination was already
+    /// mounted, it does nothing.
+    pub fn launch(&mut self, source: impl Into<String>, destination: impl Into<String>) {
+        self.launches.push((source.into(), destination.into()));
+    }
+}
 
 pub(crate) struct TextFlight {
     pub source_key: String,
