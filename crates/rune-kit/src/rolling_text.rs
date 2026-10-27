@@ -7,7 +7,8 @@
 //! the new clusters are matched to the old ones (common prefix and suffix, then an LCS of the
 //! middle for short strings): matched clusters keep their key and slide to their new x on the
 //! layout spring; the rest leave through one edge and enter from the other with a small per-glyph
-//! stagger. The row's width springs to the new width (`width_leads`). Everything runs on the
+//! stagger. A label given its [`RollingText::value`] picks the edge from the value's direction, as
+//! SwiftUI's `.numericText(value:)` does: up as it rises, down as it falls. The row's width springs to the new width (`width_leads`). Everything runs on the
 //! render clock; reduced motion drops the travel and leaves a crossfade.
 //!
 //! Keys must survive between builds, so each label remembers its previous clusters by its
@@ -33,6 +34,8 @@ const LCS_BUDGET: usize = 48 * 48;
 struct Memory {
     clusters: Vec<(String, u64)>,
     next: u64,
+    value: Option<f64>,
+    falling: bool,
 }
 
 thread_local! {
@@ -53,6 +56,7 @@ pub struct RollingText {
     color: Option<Color>,
     spring: Spring,
     from: Edge,
+    value: Option<f64>,
 }
 
 impl RollingText {
@@ -69,6 +73,7 @@ impl RollingText {
             color: None,
             spring: Self::SPRING,
             from: Edge::Bottom,
+            value: None,
         }
     }
     pub fn font(mut self, font: TextStyle) -> Self {
@@ -90,11 +95,19 @@ impl RollingText {
         self.from = edge;
         self
     }
+    /// The number the label shows (SwiftUI's `.numericText(value:)`): when it rises, new glyphs
+    /// enter from [`RollingText::from`] (digits move up); when it falls, from the opposite edge.
+    /// An unchanged value keeps the last direction, so words around a number roll as it last did.
+    pub fn value(mut self, value: f64) -> Self {
+        self.value = Some(value);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let font = self.font.unwrap_or(k.ty.ui);
         let color = self.color.unwrap_or(k.c.text_base);
-        let glyphs = keys(&self.key, &self.text);
+        let (glyphs, falling) = keys(&self.key, &self.text, self.value);
+        let from = if falling { self.from.opposite() } else { self.from };
         let edge = (font.line_px() * 0.12).max(1.0);
         // The fades sit in padding that negative margins take back out of layout, so the resting
         // glyphs (descenders included) are never faded but rolling glyphs and a growing or
@@ -127,9 +140,9 @@ impl RollingText {
                 self.spring
             };
             let tr = if g.entered {
-                Transition::push(self.from)
+                Transition::push(from)
             } else {
-                Transition::asymmetric(Transition::identity(), Transition::push(self.from))
+                Transition::asymmetric(Transition::identity(), Transition::push(from))
             };
             e = e.child(
                 text(g.cluster)
@@ -153,8 +166,9 @@ struct Glyph {
 }
 
 /// Assigns each cluster of `text` a stable id: clusters matched to the previous text under `key`
-/// keep theirs, the rest get fresh ones.
-fn keys(key: &str, text: &str) -> Vec<Glyph> {
+/// keep theirs, the rest get fresh ones. Also whether `value` fell since the last build that gave
+/// one (the last direction when it holds).
+fn keys(key: &str, text: &str, value: Option<f64>) -> (Vec<Glyph>, bool) {
     MEMORY.with(|m| {
         let mut m = m.borrow_mut();
         let mem = m.entry(key.to_owned()).or_default();
@@ -174,7 +188,15 @@ fn keys(key: &str, text: &str) -> Vec<Glyph> {
             glyphs.push(Glyph { cluster: (*c).to_owned(), id, entered });
         }
         mem.clusters = glyphs.iter().map(|g| (g.cluster.clone(), g.id)).collect();
-        glyphs
+        let falling = match (mem.value, value) {
+            (Some(old), Some(new)) if new != old => new < old,
+            _ => mem.falling,
+        };
+        mem.falling = falling;
+        if value.is_some() {
+            mem.value = value;
+        }
+        (glyphs, falling)
     })
 }
 
@@ -270,12 +292,23 @@ mod tests {
 
     #[test]
     fn rebuilding_the_same_text_keeps_every_key() {
-        let a: Vec<u64> = keys("same", "0:30").iter().map(|g| g.id).collect();
-        let b: Vec<u64> = keys("same", "0:30").iter().map(|g| g.id).collect();
+        let a: Vec<u64> = keys("same", "0:30", None).0.iter().map(|g| g.id).collect();
+        let b: Vec<u64> = keys("same", "0:30", None).0.iter().map(|g| g.id).collect();
         assert_eq!(a, b);
-        let c = keys("same", "0:29");
+        let c = keys("same", "0:29", None).0;
         assert_eq!((c[0].id, c[1].id), (a[0], a[1]));
         assert!(c[2].entered && c[3].entered && !c[0].entered);
         assert!(c[2].id > a[3] && c[3].id > a[3], "new glyphs never reuse an exiting key");
+    }
+
+    #[test]
+    fn a_value_rolls_the_way_it_moves() {
+        let falls = |text: &str, v: Option<f64>| keys("dir", text, v).1;
+        assert!(!falls("9s", Some(9.0)), "the first build rolls nowhere, as counting up");
+        assert!(!falls("10s", Some(10.0)), "rising");
+        assert!(falls("8s", Some(8.0)), "falling");
+        assert!(falls("8 s", Some(8.0)), "a held value keeps the last direction");
+        assert!(falls("8s", None), "a build without a value keeps it too");
+        assert!(!falls("12s", Some(12.0)), "rising again");
     }
 }

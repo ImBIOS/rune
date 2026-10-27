@@ -338,3 +338,24 @@ fn a_digit_changing_soon_after_the_label_fades_in_rolls_in() {
         }
     }
 }
+
+/// A label given its value rolls new digits up while it rises and down when it falls.
+#[test]
+fn a_value_picks_the_roll_direction() {
+    fn view(s: &(String, f64), _cx: &mut Cx<(String, f64)>) -> El {
+        let k = Kit::neutral(true);
+        rune::row().padding(20.0).child(RollingText::new("dir", s.0.clone()).value(s.1).font(k.ty.body).build(&k))
+    }
+    let mut rt = Runtime::new(("8".to_string(), 8.0), view, (400.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for (text, value, below) in [("9", 9.0, true), ("8", 8.0, false), ("9", 9.0, true)] {
+        rt.update(|s, _| *s = (text.into(), value));
+        rt.frame(1.0 / 120.0);
+        let e = rt.elements().into_iter().find(|e| !e.inert && e.text.as_deref() == Some(text) && e.key.as_deref().is_some_and(|k| k.starts_with("dir."))).unwrap();
+        let dy = e.rect[1] - e.target[1];
+        assert!(if below { dy > 1.0 } else { dy < -1.0 }, "{text}: enters from {}: dy {dy}", if below { "below" } else { "above" });
+        for _ in 0..120 {
+            rt.frame(1.0 / 120.0);
+        }
+    }
+}
