@@ -85,3 +85,25 @@ fn reduced_motion_or_a_mounted_destination_does_not_launch() {
     let frames: Vec<_> = (0..30).map(|_| { rt.frame(1.0 / 120.0); rect(&rt, "body", Some("second")) }).collect();
     assert!(frames.iter().all(|(r, t)| r == t), "an already mounted row stays put");
 }
+
+#[test]
+fn a_launch_whose_slot_moves_mid_flight_lands_there_without_a_lurch() {
+    let mut rt = app(false);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    let frames: Vec<_> = (0..120).map(|f| {
+        // A row above grows while the message is in the air, as a prompt does when the steer
+        // under it stops joining its run.
+        if f == 4 { rt.update(|s, _| s.sent[1] = "second\nand a line\nand another".into()); }
+        rt.frame(1.0 / 120.0);
+        rect(&rt, "body", Some("third"))
+    }).collect();
+    let (last, end) = frames[frames.len() - 1];
+    assert_eq!(last, end, "lands on its moved place");
+    for axis in 0..2 {
+        let at: Vec<f32> = frames.iter().map(|(r, _)| r[axis]).collect();
+        let steps: Vec<f32> = at.windows(2).map(|w| w[1] - w[0]).collect();
+        for (k, w) in steps.windows(2).enumerate() {
+            assert!((w[1] - w[0]).abs() <= 10.0, "axis {axis} lurches {} pt at frame {}: {at:?}", w[1] - w[0], k + 1);
+        }
+    }
+}

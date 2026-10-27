@@ -9,14 +9,12 @@ pub(super) struct Launches {
     flying: Vec<Launched>,
 }
 
-/// A launch in the air: the offsets outside the scene it was started against, and the
-/// difference its first frame found.
+/// A launch in the air, the offsets outside the scene it was started against, and the ones
+/// its last frame drew it under.
 struct Launched {
     id: NodeId,
     shift: [f32; 2],
-    fix: Option<[f32; 2]>,
-    /// The scene path holds `fix`.
-    carried: bool,
+    last: Option<[f32; 2]>,
 }
 
 impl Launches {
@@ -25,28 +23,30 @@ impl Launches {
     /// Draws outside every clip, at its own size, until it lands.
     pub(super) fn flying(&self, id: NodeId) -> bool { self.flying.iter().any(|l| l.id == id) }
 
+    /// Before its destination's layout moves mid-flight and its path restarts from where it is:
+    /// it starts again under the offsets it was last drawn under, so the restart doesn't jump.
+    pub(super) fn restart(&mut self, scene: &Scene, id: NodeId) {
+        let Some(l) = self.flying.iter_mut().find(|l| l.id == id) else { return };
+        let Some(last) = l.last else { return };
+        let travel = scene.get(id, prop::TRAVEL).unwrap_or(rune_motion::Vec2::new(1.0, 1.0));
+        l.shift = [last[0] + (l.shift[0] - last[0]) * (1.0 - travel.x), last[1] + (l.shift[1] - last[1]) * (1.0 - travel.y)];
+    }
+
     /// Drops launches that landed (left `flying`).
     pub(super) fn keep(&mut self, flying: &[(NodeId, MRect)]) {
         self.flying.retain(|l| flying.iter().any(|f| f.0 == l.id));
     }
 
-    /// A launch starts where its source was seen, whatever offsets (a growth row above still
-    /// resizing, a moved virtual window) its first frame finds at `offset`: what to add to it.
-    pub(super) fn first_frame(&mut self, scene: &Scene, id: NodeId, offset: [f32; 2]) -> [f32; 2] {
-        let Some(l) = self.flying.iter_mut().find(|l| l.id == id && !l.carried) else { return [0.0; 2] };
-        let fix = *l.fix.get_or_insert([l.shift[0] - offset[0], l.shift[1] - offset[1]]);
+    /// A launch leaves from where its source was seen and flies to where its destination is
+    /// now: it starts under the offsets outside the scene it launched against and ends under
+    /// this frame's `offset`, blending by its travel. A growth row above still resizing, a
+    /// moved virtual window, or a row whose slot moves under an offset that hides the move
+    /// (an inserted row's growth) shifts where it lands, never where it is. What to add to it.
+    pub(super) fn offset_fix(&mut self, scene: &Scene, id: NodeId, offset: [f32; 2]) -> [f32; 2] {
+        let Some(l) = self.flying.iter_mut().find(|l| l.id == id) else { return [0.0; 2] };
+        l.last = Some(offset);
         let travel = scene.get(id, prop::TRAVEL).unwrap_or(rune_motion::Vec2::new(1.0, 1.0));
-        [fix[0] * (1.0 - travel.x), fix[1] * (1.0 - travel.y)]
-    }
-
-    /// After a launch's first frame, its path carries the offsets that frame found.
-    pub(super) fn carry(&mut self, scene: &mut Scene) {
-        for l in &mut self.flying {
-            if let Some(fix) = l.fix && !l.carried {
-                scene.shift_travel(l.id, rune_motion::Vec2::new(fix[0], fix[1]));
-                l.carried = true;
-            }
-        }
+        [(l.shift[0] - offset[0]) * (1.0 - travel.x), (l.shift[1] - offset[1]) * (1.0 - travel.y)]
     }
 }
 
@@ -151,7 +151,7 @@ impl<S: 'static> Runtime<S> {
             self.flying.retain(|f| f.0 != to);
             self.flying.push((to, nodes[i].local));
             self.launches.flying.retain(|l| l.id != to);
-            self.launches.flying.push(Launched { id: to, shift, fix: None, carried: false });
+            self.launches.flying.push(Launched { id: to, shift, last: None });
         }
     }
 

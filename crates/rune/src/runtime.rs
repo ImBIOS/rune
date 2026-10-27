@@ -2648,7 +2648,6 @@ impl<S: 'static> Runtime<S> {
             animating |= self.build();
         }
         self.finish_keeps();
-        self.launches.carry(&mut self.scene);
         self.report_at_bottom();
         animating |= self.report_visible_rows();
         self.report_layout();
@@ -4407,7 +4406,9 @@ impl<S: 'static> Runtime<S> {
                     // commit doesn't re-time it.
                     if self.flying[f].1 != nodes[i].local {
                         self.flying[f].1 = nodes[i].local;
-                        let la = if layout_anim == LayoutAnim::INSTANT { LayoutAnim::new(spring_l) } else { layout_anim };
+                        // A growth row's instant vertical place would land the whole flight.
+                        let la = if layout_anim.x == Anim::INSTANT || layout_anim.y == Anim::INSTANT { LayoutAnim::new(spring_l) } else { layout_anim };
+                        self.launches.restart(&self.scene, id);
                         self.scene.set_frame(id, scene_rect, la.screen());
                     }
                 } else if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
@@ -6084,7 +6085,7 @@ impl<S: 'static> Runtime<S> {
                     paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
                     scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0, ..pinh };
-                let fix = self.launches.first_frame(&self.scene, node_id, [pinh.dx, pinh.dy]);
+                let fix = self.launches.offset_fix(&self.scene, node_id, [pinh.dx, pinh.dy]);
                 (pinh.dx, pinh.dy) = (pinh.dx + fix[0], pinh.dy + fix[1]);
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
