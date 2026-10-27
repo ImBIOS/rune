@@ -206,7 +206,19 @@ fn extend_run(out: &mut Vec<Instance>, mut rect: [f32; 4], fill: [f32; 4], radiu
         i.fill == fill && i.clip == clip && i.radii == [radius; 4] && i.params[1] == crate::render::KIND_RECT
             && (-1.0..=reach).contains(&gap) && overlap > 0.6 * i.rect[3].min(rect[3])
     }).map(|k| from + k);
-    let Some(at) = found else { return out.push(rect_inst(rect, fill, radius, clip, fade)) };
+    let Some(at) = found else {
+        // First on its line, inside a chip's background: start the highlight at the chip's edge.
+        let chip = out[from..].iter().rev().find(|i| {
+            let overlap = (i.rect[1] + i.rect[3]).min(rect[1] + rect[3]) - i.rect[1].max(rect[1]);
+            i.params[1] == crate::render::KIND_RECT && i.fill != fill && i.fill[3] > 0.0 && i.rect[0] >= rect[0] - reach && i.rect[0] < rect[0]
+                && i.rect[0] + i.rect[2] > rect[0] && i.rect[3] <= 1.8 * rect[3] && overlap > 0.6 * rect[3]
+        }).map(|i| i.rect);
+        if let Some(c) = chip {
+            let (top, bottom) = (c[1].min(rect[1]), (c[1] + c[3]).max(rect[1] + rect[3]));
+            rect = [c[0], top, rect[0] + rect[2] - c[0], bottom - top];
+        }
+        return out.push(rect_inst(rect, fill, radius, clip, fade));
+    };
     let covered = out[at + 1..].iter().any(|i| i.params[1] == crate::render::KIND_RECT && i.fill != fill && i.fill[3] > 0.0);
     let prev = &mut out[at];
     let (top, bottom) = (prev.rect[1].min(rect[1]), (prev.rect[1] + prev.rect[3]).max(rect[1] + rect[3]));
