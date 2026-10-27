@@ -1,4 +1,4 @@
-//! Key names in headless scripts and `--keys`.
+//! Key names, modifiers and unmodified characters in headless scripts and `--keys`.
 use crate::edit::Key;
 
 pub(crate) fn key_named(name: &str) -> Option<Key> {
@@ -23,6 +23,12 @@ pub(crate) fn key_named(name: &str) -> Option<Key> {
         c if c.chars().count() == 1 => Key::Text(c.to_owned()),
         _ => return None,
     })
+}
+
+/// A script step's modifier flags.
+pub(crate) fn script_mods(e: &serde_json::Value) -> crate::Mods {
+    let flag = |k: &str| e[k].as_bool().unwrap_or(false);
+    crate::Mods { shift: flag("shift"), cmd: flag("cmd"), alt: flag("alt"), ctrl: flag("ctrl"), logo: flag("logo") }
 }
 
 /// A script key's `Tx::key_base`: its `"base"`, else a one-character name typed without Shift

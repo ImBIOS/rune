@@ -1,0 +1,30 @@
+//! What a commit asks of the window besides its pixels: the content height a window that
+//! fits its content asks for (`App::fit_content_height`).
+use super::*;
+
+impl<S: 'static> Runtime<S> {
+    /// Asks the window for the content's new height, on this commit's spring. The first
+    /// commit, a viewport change and `Tx::instant` jump.
+    pub(super) fn fit_window(&mut self, height: f32, tx: &Tx, first: bool) {
+        let height = height.ceil_to(self.env.scale).max(1.0);
+        if self.fit_asked.unwrap_or(self.viewport.1) == height { return; }
+        self.fit_asked = Some(height);
+        let jump = first || tx.instant || tx.relayout || self.reduced_motion;
+        // Only a macOS window and headless runs move the frame on a spring.
+        if !jump && self.window_resting && (cfg!(target_os = "macos") || self.wall_start.is_none()) { self.fit_hold = true; }
+        let request = crate::window_frame::FrameRequest {
+            size: Some((self.viewport.0, height)), animate: !jump,
+            spring: (!jump).then(|| tx.motion.unwrap_or(motion::DEFAULT)), center: false,
+        };
+        self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
+    }
+
+    /// The root's natural height at the current width, measured without committing, so a
+    /// window that fits its content can open at that height.
+    pub(crate) fn content_height(&mut self) -> f32 {
+        let measured = self.measure(&Tx::default());
+        let height = measured.nodes.first().map_or(self.viewport.1, |root| root.local.h);
+        self.layout = measured.layout;
+        height.ceil_to(self.env.scale).max(1.0)
+    }
+}

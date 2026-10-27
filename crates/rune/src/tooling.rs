@@ -598,12 +598,6 @@ pub(crate) fn wheel<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), dx: f32
     if dx == 0.0 && !rt.hears_wheel() { rt.wheel(x, y, dy) } else { rt.wheel_xy(x, y, dx, dy) }
 }
 
-/// A script step's modifier flags.
-fn script_mods(e: &Value) -> Mods {
-    let flag = |k: &str| e[k].as_bool().unwrap_or(false);
-    Mods { shift: flag("shift"), cmd: flag("cmd"), alt: flag("alt"), ctrl: flag("ctrl"), logo: flag("logo") }
-}
-
 fn script_phase(e: &Value) -> crate::GesturePhase {
     match e["phase"].as_str().unwrap_or("moved") {
         "began" => crate::GesturePhase::Began,
@@ -1352,7 +1346,7 @@ pub(crate) fn straight_alpha(pixels: &mut [u8]) {
 mod eased_input;
 #[path = "tooling/key_names.rs"]
 mod key_names;
-pub(crate) use key_names::{key_named, script_key_base};
+pub(crate) use key_names::{key_named, script_key_base, script_mods};
 #[cfg(test)]
 #[path = "tooling/window_tests.rs"]
 mod window_tests;
