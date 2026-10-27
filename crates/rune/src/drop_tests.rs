@@ -279,3 +279,42 @@ fn a_target_that_hears_rejected_drops_stops_them_and_shows_its_own_hover() {
     rt.frame(9.0 / 60.0);
     assert!(rt.state.hover.is_empty() && rt.drop_rejected_hovered().is_none(), "an empty drag claims no rejected hover");
 }
+
+#[test]
+fn a_target_that_follows_the_drag_hears_its_point_on_the_element_and_where_it_dropped() {
+    #[derive(Default)]
+    struct Caret { seen: Vec<(&'static str, Option<(f32, f32)>)> }
+    fn view(_: &Caret, _: &mut Cx<Caret>) -> El {
+        let local = |tx: &crate::Tx| tx.drop_point().map(|p| (p.x, p.y));
+        col().w_full().h_full().children([
+            el().size(200.0, 20.0),
+            el().key("doc").size(200.0, 100.0)
+                .on_drop_files(move |s: &mut Caret, _, tx| s.seen.push(("drop", local(tx))))
+                .on_drop_hover(move |s: &mut Caret, over, tx| s.seen.push((if over { "over" } else { "off" }, local(tx))))
+                .on_drop_move(|s: &mut Caret, p, tx| { assert_eq!(tx.drop_point(), Some(p)); s.seen.push(("move", Some((p.x, p.y)))) }),
+            el().key("plain").size(200.0, 100.0).on_drop_files(|_: &mut Caret, _, _| {}),
+        ])
+    }
+    let mut rt = Runtime::new(Caret::default(), view, (400.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let take = |rt: &mut Runtime<Caret>| std::mem::take(&mut rt.state.seen);
+    rt.drag_files(files(&["a.txt"]), Some((30.0, 40.0)));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(take(&mut rt), [("over", Some((30.0, 20.0))), ("move", Some((30.0, 20.0)))], "points on the element, below its 20 pt neighbour");
+
+    assert!(!rt.drag_files_to(Some((30.0, 40.0))), "a drag that didn't move asks for nothing");
+    assert!(rt.drag_files_to(Some((50.0, 60.0))), "a move over a target that follows it asks for a frame");
+    assert!(!rt.drag_files_to(Some((60.0, 70.0))), "once a frame");
+    rt.frame(2.0 / 60.0);
+    assert_eq!(take(&mut rt), [("move", Some((60.0, 50.0)))], "at the latest point");
+
+    assert!(rt.drag_files_to(Some((60.0, 150.0))), "onto another target");
+    rt.frame(3.0 / 60.0);
+    assert_eq!(take(&mut rt), [("off", None)]);
+    assert!(!rt.drag_files_to(Some((70.0, 160.0))), "a target that doesn't follow the drag asks for no frames as it moves");
+
+    rt.drag_files(files(&["a.txt"]), Some((70.0, 80.0)));
+    rt.drop_files(files(&["a.txt"]), Some((70.0, 80.0)));
+    rt.frame(4.0 / 60.0);
+    assert_eq!(take(&mut rt), [("over", Some((70.0, 60.0))), ("move", Some((70.0, 60.0))), ("off", None), ("drop", Some((70.0, 60.0)))]);
+}

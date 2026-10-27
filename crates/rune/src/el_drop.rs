@@ -1,23 +1,26 @@
-//! Files dropped on an element from another app: `El::on_drop_files` and the hover and
-//! reject callbacks around it. `drop_dispatch.rs` routes the drag.
+//! Files dropped on an element from another app: `El::on_drop_files` and the hover, move
+//! and reject callbacks around it, and `Tx::drop_point`. `drop_dispatch.rs` routes the drag.
 use std::rc::Rc;
 
-use crate::el::{El, Tx};
+use crate::el::{El, PointerEvent, Tx};
 use crate::states::downcast;
 
 pub(crate) type DropFilesFn = Rc<dyn Fn(crate::states::States<'_>, &[std::path::PathBuf], &mut Tx)>;
 
-/// [`El::on_drop_files`], [`El::accepts_files`], [`El::on_drop_hover`], [`El::on_drop_rejected`]
-/// and [`El::on_drop_rejected_hover`].
+/// [`El::on_drop_files`], [`El::accepts_files`], [`El::on_drop_hover`], [`El::on_drop_move`],
+/// [`El::on_drop_rejected`] and [`El::on_drop_rejected_hover`].
 #[derive(Clone, Default)]
 pub(crate) struct DropSpec {
     pub on_drop: Option<DropFilesFn>,
-    pub accepts: Option<Rc<dyn Fn(&std::path::Path) -> bool>>,
+    pub accepts: Option<AcceptsFn>,
     pub on_hover: Option<DropHoverFn>,
     pub on_reject: Option<DropFilesFn>,
     pub on_reject_hover: Option<DropHoverFn>,
+    pub on_move: Option<DropMoveFn>,
 }
+pub(crate) type AcceptsFn = Rc<dyn Fn(&std::path::Path) -> bool>;
 pub(crate) type DropHoverFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx)>;
+pub(crate) type DropMoveFn = Rc<dyn Fn(crate::states::States<'_>, PointerEvent, &mut Tx)>;
 
 impl DropSpec {
     /// The files of `paths` this element takes, when it's a drop target, and the rest.
@@ -53,6 +56,8 @@ impl El {
     ///     .on_drop_hover(|s: &mut App, over, _| s.over = over);
     /// ```
     ///
+    /// [`Tx::drop_point`] says where on the element the files landed, to insert them there.
+    ///
     /// macOS, Windows and X11. Wayland reports no file drags in winit 0.30, and the web build
     /// has no paths to give. Headless scripts drop files with `drop_files` events.
     pub fn on_drop_files<S: 'static>(mut self, f: impl Fn(&mut S, &[std::path::PathBuf], &mut Tx) + 'static) -> Self {
@@ -75,10 +80,22 @@ impl El {
     /// Called with `true` when a file drag over the window makes this element the drop target
     /// (the innermost [`El::on_drop_files`] under the pointer that accepts the files), and with
     /// `false` when the drag moves off it, leaves the window, or drops, or when the element goes
-    /// away under the drag. Draw a drop
-    /// highlight from it.
+    /// away under the drag. Draw a drop highlight from it. With `true`, [`Tx::drop_point`] says
+    /// where the drag came in.
     pub fn on_drop_hover<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
         self.drop.get_or_insert_default().on_hover = Some(Rc::new(move |s, over, tx| f(downcast::<S>(s), over, tx)));
+        self
+    }
+    /// Follow a file drag this element takes ([`El::on_drop_files`]) while it's over it: `f`
+    /// hears the drag's point on the element, in the element's own points as
+    /// [`El::on_pointer_move_local`] gives them, when it becomes the target and then as the drag
+    /// moves, at most once a frame. Draw a drop caret from it, cleared by
+    /// [`El::on_drop_hover`]'s `false`, and insert where [`Tx::drop_point`] says on the drop.
+    /// Only an element with this asks the window for frames as the drag moves over it, and a
+    /// drag the platform gives no position for is never heard here. Scripts move a drag with
+    /// further `drag_files` events.
+    pub fn on_drop_move<S: 'static>(mut self, f: impl Fn(&mut S, PointerEvent, &mut Tx) + 'static) -> Self {
+        self.drop.get_or_insert_default().on_move = Some(Rc::new(move |s, p, tx| f(downcast::<S>(s), p, tx)));
         self
     }
     /// Hear the files dropped on this element that it doesn't accept ([`El::accepts_files`]),
@@ -107,4 +124,12 @@ impl El {
         self.drop.get_or_insert_default().on_reject_hover = Some(Rc::new(move |s, over, tx| f(downcast::<S>(s), over, tx)));
         self
     }
+}
+
+impl Tx {
+    /// In [`El::on_drop_files`], [`El::on_drop_rejected`], [`El::on_drop_move`] and
+    /// [`El::on_drop_hover`]'s `true`: where the file drag is on the element, in its own points
+    /// (`x`, `y`, following its scroll and transforms) and in the window's. `None` when the
+    /// platform gave no position and in every other handler.
+    pub fn drop_point(&self) -> Option<PointerEvent> { self.drop_point }
 }

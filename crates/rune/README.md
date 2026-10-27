@@ -1323,6 +1323,13 @@ el().fill(if s.over { Color::WHITE.alpha(0.1) } else { Color::TRANSPARENT })
 - Only that target is drop-hovered. It hears `on_drop_hover(true)` when the drag reaches it, and
   `false` when the drag moves to another target, leaves the window or drops, or when the
   target goes away under the drag.
+- To drop at the pointer (an editor inserting a file where it lands), read `tx.drop_point()`
+  in `on_drop_files`: the drop's point on the element (`x`, `y`, following its scroll and
+  transforms, and `window_x`, `window_y`), `None` when the platform gave none. To draw a drop
+  caret while the drag is over the target, add `.on_drop_move(|s, p, tx| ..)`: it hears the
+  point when the target is reached and as the drag moves, at most once a frame, and
+  `on_drop_hover(false)` clears it. Only a target with `on_drop_move` asks for frames as the
+  drag moves; scripts move a drag with further `drag_files` events.
 - A drop over no accepting element goes to the root's `on_drop_files`, if it has one, else
   it's ignored. Put the handler on the root to take drops anywhere in the window.
 - While a modal is open, its root stands in for the window's, and a drop outside the modal

@@ -56,6 +56,8 @@ pub struct Tx {
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
+    /// `Tx::drop_point`.
+    pub(crate) drop_point: Option<PointerEvent>,
     pub(crate) title: Option<String>,
     pub(crate) open_urls: Vec<String>,
     pub(crate) trace: Option<TraceCalls>,
