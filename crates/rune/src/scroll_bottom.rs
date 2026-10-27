@@ -29,6 +29,9 @@ pub(super) struct Slack {
     grew_at: f64,
     /// The window size at the last commit: a resize lands the slack.
     pub(super) window: (f32, f32),
+    /// `Tx::follow_edge`: until the viewport's edges reach their layout, the rows ride them
+    /// and the room they free adds no slack.
+    pub(super) follow: bool,
 }
 
 impl Slack {
@@ -184,6 +187,7 @@ impl<S: 'static> Runtime<S> {
         let top_c = self.scene.presented(self.nodes[c].id).map_or(view[1], |p| p.rect.edges()[1]);
         let limit = top_c + (self.nodes[c].target[3] - self.nodes[c].target[1] - pad);
         let now = self.t;
+        let target = self.nodes[i].target;
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
         let s = &mut st.slack;
         let h0 = s.track.h;
@@ -197,13 +201,14 @@ impl<S: 'static> Runtime<S> {
             // Growth fills the slack first. Room the bottom edge gains while the rows sit on it
             // joins it, unless the whole viewport moved down with it.
             let mut h = s.track.h - grown;
-            if let Some([top0, bottom0]) = s.edges && st.held {
+            if let Some([top0, bottom0]) = s.edges && st.held && !s.follow {
                 let (b0, b1) = if short > 0.5 { (bottom0.min(limit), bottom.min(limit)) } else { (bottom0, bottom) };
                 h += (b1 - b0) - (top - top0).max(0.0);
             }
             s.track.h = h.max(0.0);
         }
         s.edges = Some([top, bottom]);
+        if s.follow && (top - target[1]).abs() < 0.01 && (bottom - target[3]).abs() < 0.01 { s.follow = false; }
         if s.track.h <= 1.0 / 128.0 {
             s.track = GrowTrack::default();
             s.closing = false;
@@ -264,7 +269,7 @@ mod tests {
 
     // One state type for every test here: each type monomorphises a whole `Runtime<S>`.
     #[derive(Default)]
-    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool, track_drawn: bool, drawn: Vec<f32>, far: Vec<bool> }
+    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool, track_drawn: bool, drawn: Vec<f32>, far: Vec<bool>, dock: Option<f32> }
 
     fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         cx.reduced_motion(s.reduced);
@@ -286,6 +291,8 @@ mod tests {
             .child(el().key("jump").w_full().h(40.0).on_press_tx(|s: &mut Chat, tx| {
                 if s.instant { tx.scroll_to_bottom_instant("stack") } else { tx.scroll_to_bottom("scroll") }
             }));
+        // A dock under the list that grows and shrinks with no row coming in.
+        let root = match s.dock { Some(h) => root.child(el().key("dock").w_full().h(h)), None => root };
         // A multi-line composer below the list, in its own small scroll area.
         let Some(edit) = &s.composer else { return root };
         let field = crate::text_input(edit, crate::TextStyle::new(14.0, 400.0)).key("composer").w_full()
@@ -734,6 +741,40 @@ mod tests {
         assert!(first_down >= grew_until + 14, "the slack waits 120 ms after growth: down at {first_down}, grew until {grew_until}");
         assert!(frames < 240, "and closes in time ({frames} frames)");
         assert!(slack_gap(&rt).abs() < 0.05, "{}", slack_gap(&rt));
+    }
+
+    /// The gap between the last row and the list's bottom each frame as the dock under it
+    /// changes to `h` on a tween, following its edge or not.
+    fn dock_gaps(rt: &mut Runtime<Chat>, h: f32, follow: bool) -> Vec<f32> {
+        rt.update(|s, tx| {
+            s.dock = Some(h);
+            tx.motion_curve(rune_motion::Curve::tween(0.3, rune_motion::Easing::EASE_OUT));
+            if follow { tx.follow_edge(); }
+        });
+        let mut gaps = vec![slack_gap(rt)];
+        for _ in 0..90 {
+            rt.frame(1.0 / 120.0);
+            gaps.push(slack_gap(rt));
+        }
+        gaps
+    }
+
+    /// With `Tx::follow_edge`, a pinned list rides a dock's top edge both ways on the dock's
+    /// curve, frame by frame. Without it the room a shrinking dock frees waits under the last
+    /// row as slack, as a send's does, and closes late.
+    #[test]
+    fn follow_edge_carries_pinned_rows_with_a_dock() {
+        let mut rt = chat(Chat { rows: 40, dock: Some(160.0), ..Default::default() });
+        for (h, way) in [(40.0, "shrinking"), (160.0, "growing"), (40.0, "shrinking again")] {
+            let gaps = dock_gaps(&mut rt, h, true);
+            let worst = gaps.iter().map(|g| g.abs()).fold(0.0, f32::max);
+            assert!(worst < 0.05, "{way}: the rows leave the edge by {worst}: {gaps:?}");
+        }
+        assert!(rects(&rt)["dock"][3] < 41.0, "the dock moved");
+        rt.update(|s, tx| { s.dock = Some(160.0); tx.settle(); });
+        rt.frame(1.0 / 120.0);
+        let held = dock_gaps(&mut rt, 40.0, false).into_iter().fold(0.0, f32::max);
+        assert!(held > 30.0, "without it the freed room waits as slack: {held}");
     }
 
     /// A hand on the list during the slack moves the rows from where they are drawn.

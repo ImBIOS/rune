@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::follow_edge()`: pinned rows ride a moving bottom edge.** Rows stuck to a
+  stick-to-bottom viewport's end used to hold the room a shrinking sibling freed as slack, then
+  close it late on the growth spring, which suits a send (a new row grows into it) but leaves a
+  gap when a panel under a chat folds away. A change made with `follow_edge` carries the rows
+  on the viewport's edge, frame by frame, on the change's curve, until the edge reaches its
+  layout. Nothing changes for apps that don't call it.
+
 - Markdown source highlights track multiline code spans inside quotes and lists exactly.
   Highlight element reporting and scroll targeting avoid quadratic work for many matches;
   oversized core highlight offsets no longer wrap. Bare URL autolinking accepts uppercase

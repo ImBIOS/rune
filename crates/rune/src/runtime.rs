@@ -2996,6 +2996,7 @@ impl<S: 'static> Runtime<S> {
             one.settle = false;
             one.motion = None;
             one.motion_curve = None;
+            one.follow_edge = false;
             one.color_motion = None;
         }
         merge(tx, one);
@@ -4700,6 +4701,7 @@ impl<S: 'static> Runtime<S> {
                 }
                 // A window resize or a settle lands the slack: the rows go straight to the bottom.
                 if tx.settle || e.slack.window != self.viewport { e.slack = scroll_bottom::Slack::landed(self.viewport); }
+                if tx.follow_edge && sp.stick_bottom && !tx.instant { e.slack.follow = true; }
             }
         }
 
@@ -8426,6 +8428,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.blur |= one.blur;
     tx.instant |= one.instant;
     tx.settle |= one.settle;
+    tx.follow_edge |= one.follow_edge;
     if one.motion.is_some() {
         tx.motion = one.motion;
         tx.motion_curve = one.motion_curve;

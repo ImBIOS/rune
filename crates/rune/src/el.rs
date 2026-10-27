@@ -24,6 +24,8 @@ pub struct Tx {
     pub(crate) motion: Option<Spring>,
     /// The layout curve from [`Tx::motion_curve`]; `motion` holds its spring stand-in.
     pub(crate) motion_curve: Option<Anim>,
+    /// `Tx::follow_edge`.
+    pub(crate) follow_edge: bool,
     pub(crate) color_motion: Option<Spring>,
     pub(crate) settle: bool,
     pub(crate) relayout: bool,
@@ -462,6 +464,13 @@ impl Tx {
             c => Spring::new(c.logical_duration().max(0.01), 0.0),
         });
         self.motion_curve = Some(anim);
+    }
+    /// Rows pinned to a stick-to-bottom viewport's bottom ride its edge through this change:
+    /// room the edge frees (a question dock folding back into a composer under a chat) carries
+    /// the rows down on the change's curve, frame by frame, instead of waiting under the last
+    /// row as slack for a new row to grow into, as a send's room does.
+    pub fn follow_edge(&mut self) {
+        self.follow_edge = true;
     }
     /// Apply this change with no animation and land every running track: growth, reveals and
     /// follow-the-end (opening or returning to a session, guarantee 8).
