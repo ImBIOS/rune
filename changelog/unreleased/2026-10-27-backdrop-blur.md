@@ -1,5 +1,5 @@
 - **`El::backdrop_blur(sigma)`: frosted glass over the window's own content.**
-  `el().backdrop_blur(20.0).fill(tint)` blurs what is already drawn behind the element, inside
+  `el().backdrop_blur(8.0).fill(tint)` blurs what is already drawn behind the element, inside
   its rounded or continuous corners and its clip, and draws the fill over it as a tint, with the
   border and children on top. It works through plain `rune::run`, follows scrolling, springs and
   opacity, and renders the same headless. The renderer splits the pass at the element, blurs a

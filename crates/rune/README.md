@@ -2006,8 +2006,8 @@ Which blur a frosted panel needs depends on what sits behind it:
 
 ```rust,ignore
 col().pin(Some(0.0), None, Some(0.0), Some(0.0)).h(60.0)
-    .backdrop_blur(20.0)
-    .fill(Color::WHITE.alpha(0.6))
+    .backdrop_blur(8.0)
+    .fill(Color::WHITE.alpha(0.45))
     .child(tabs)
 ```
 

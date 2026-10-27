@@ -7,7 +7,8 @@
 //! cargo run -p frosted-bar --profile perf -- --script examples/frosted-bar/scroll.json --frames 480 --fps 120 --scale 2
 //! ```
 //!
-//! `--scene plain` draws the same bar with its tint alone, for comparison.
+//! The bar blurs at σ 8 pt under a light tint. `--scene strong` blurs at σ 20 pt under a
+//! heavier tint; `--scene plain` draws the bar with its tint alone, for comparison.
 
 use rune::tok::{self, type_};
 use rune::{AppSpec, Cx, El, ScrollSpec, TextStyle, col, el, oklch, oklcha, row, text};
@@ -15,10 +16,18 @@ use rune::{AppSpec, Cx, El, ScrollSpec, TextStyle, col, el, oklch, oklcha, row, 
 const BAR: f32 = 60.0;
 const TABS: [&str; 4] = ["Inbox", "Today", "Later", "Done"];
 
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Look {
+    #[default]
+    Soft,
+    Strong,
+    Plain,
+}
+
 #[derive(Default)]
 struct State {
     tab: usize,
-    plain: bool,
+    look: Look,
 }
 
 fn list_row(i: usize, dark: bool) -> El {
@@ -46,10 +55,15 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tok::theme(dark);
     let rows = col().w_full().pb(BAR).children((0..60).map(|i| list_row(i, dark)));
     let list = col().key("list").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(rows);
-    let tint = if dark { oklcha(0.2, 0.005, 265.0, 0.55) } else { oklcha(0.98, 0.003, 265.0, 0.6) };
+    let (sigma, alpha) = match s.look {
+        Look::Soft => (8.0, if dark { 0.4 } else { 0.45 }),
+        Look::Strong => (20.0, if dark { 0.55 } else { 0.6 }),
+        Look::Plain => (0.0, if dark { 0.4 } else { 0.45 }),
+    };
+    let tint = if dark { oklcha(0.2, 0.005, 265.0, alpha) } else { oklcha(0.98, 0.003, 265.0, alpha) };
     let hairline = el().w_full().h(0.5).fill(t.separator);
     let bar = col().key("bar").pin(Some(0.0), None, Some(0.0), Some(0.0)).h(BAR)
-        .backdrop_blur(if s.plain { 0.0 } else { 20.0 }).fill(tint)
+        .backdrop_blur(sigma).fill(tint)
         .child(hairline)
         .child(row().w_full().grow(1.0).children((0..TABS.len()).map(|i| tab(i, s, dark))));
     el().w_full().h_full().fill(t.bg).child(list).child(bar)
@@ -57,7 +71,7 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 fn main() {
     rune::run(AppSpec::<State> {
-        scenes: &[("plain", |s| s.plain = true)],
+        scenes: &[("strong", |s| s.look = Look::Strong), ("plain", |s| s.look = Look::Plain)],
         ..AppSpec::new("Frosted bar", (390.0, 640.0), State::default, view)
     });
 }

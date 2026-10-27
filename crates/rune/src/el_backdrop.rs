@@ -19,7 +19,7 @@ impl El {
 
     /// Blurs what is already drawn behind this element in the same window, inside its rounded
     /// (or continuous) corners and clip, then draws the element's fill over the blur as a tint,
-    /// with its border and children on top: `el().backdrop_blur(20.0).fill(tint)` is a frosted
+    /// with its border and children on top: `el().backdrop_blur(8.0).fill(tint)` is a frosted
     /// bar. `sigma` is the Gaussian standard deviation in points, as in CSS
     /// `backdrop-filter: blur()`; 0 turns it off. Blurs past about 78 points at 2x stop growing.
     ///
