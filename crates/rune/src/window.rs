@@ -606,8 +606,9 @@ pub(crate) fn start<S: 'static>(mut spec: WindowSpec<S>, handle: Option<WindowHa
     crate::video::enable_playback();
     cx.overlays.append(&mut spec.app.overlays);
     let handle = handle.unwrap_or_else(|| WindowHandle::new(&spec.key));
+    let open_urls = crate::open_url_in::listen(&spec.app);
     let mut host = Host::new(spec, handle, args, cx.proxy, cx.slot, cx.gpu, cx.wayland);
-    host.keeps_loop = keeps_loop;
+    (host.keeps_loop, host._open_urls) = (keeps_loop, open_urls);
     Some(Box::new(host))
 }
 
@@ -647,6 +648,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
             let proxy = self.proxy.clone();
             crate::reopen::install(move || proxy.send_event(WakeEvent::Reopen).is_ok());
         }
+        crate::open_url_in::settle();
         // A window opened at launch took it; a GPU kept for a later one would sit idle until then.
         crate::render::discard_prewarm();
         self.cleanup(event_loop);
@@ -746,6 +748,8 @@ struct Host<S: 'static> {
     keep_running: bool,
     on_close: Option<fn(&mut S, &mut Tx)>,
     on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
+    /// Its place among the windows receiving links (`App::on_open_url`).
+    _open_urls: Option<crate::open_url_in::Listening>,
     /// When it last hid, in `reopen::stamp` order.
     hidden_at: Option<u64>,
     release_gpu: bool,
@@ -889,6 +893,7 @@ impl<S: 'static> Host<S> {
             keep_running,
             on_close,
             on_reopen,
+            _open_urls: None,
             hidden_at: None,
             release_gpu,
             open_at_start: open,
@@ -2014,15 +2019,13 @@ impl<S: 'static> Host<S> {
         let clipboard = self.clipboard.receive(&mut self.rt);
         let answered = self.popup.answer(&mut self.rt) | self.file_dialog.answer(&mut self.rt);
         self.shortcuts.drain();
-        let mut requests = self.shared.take();
         self.menus.drain();
-        let updates = std::mem::take(&mut requests.updates);
-        let had_updates = !updates.is_empty();
-        let mut updated = false;
-        for f in updates {
+        let (mut had_updates, mut updated) = (false, false);
+        let requests = self.shared.drain(|f| {
+            had_updates = true;
             updated |= self.rt.update_if(f);
             self.menus.drain();
-        }
+        });
         let changed = clipboard || answered || updated || self.rt.drag_ends_pending();
         // Only updates that changed nothing (`AppHandle::update_if`), or an empty startup drain
         // after `try_create` already drew the first frame, ran: no poll, no frame.
@@ -3043,6 +3046,8 @@ impl<S: 'static> Host<S> {
         if self.started {
             return;
         }
+        // Updates queued before launch (the link that launched the app) show in the first frame.
+        for f in self.shared.take_updates() { self.rt.update_if(f); self.menus.drain(); }
         if self.launcher() {
             self.create(event_loop, None, false);
             if self.open_at_start && self.options.visible { self.reveal_launcher(event_loop); }

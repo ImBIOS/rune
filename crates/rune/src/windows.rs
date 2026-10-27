@@ -332,7 +332,6 @@ impl<S: 'static> ErasedWindow for Erased<S> {
             inherited.scene = None;
             inherited.size = None;
         }
-        crate::open_url_in::listen(&self.spec.app);
         crate::window::start(self.spec, self.handle, !self.secondary, inherited, cx)
     }
 }

@@ -277,12 +277,11 @@ impl<S: 'static> Member for Window<S> {
     fn drain(&mut self, desktop: &VirtualDesktop, t: f64) -> Changes {
         let mut changes = Changes::default();
         self.shortcuts.drain();
-        let requests = self.shared.take();
         self.menus.drain();
-        for f in requests.updates {
+        let requests = self.shared.drain(|f| {
             self.rt.update_if(f);
             self.menus.drain();
-        }
+        });
         if let Some(p) = requests.position { self.move_to(desktop.to_points(p)); }
         if let Some(place) = &requests.place { self.place(desktop, place, t); }
         if let Some(request) = requests.window { self.request(request, &mut changes); }

@@ -283,13 +283,13 @@ impl<S: 'static> App<S> {
 
     /// macOS: runs on the main thread with each link the system opens with this app
     /// (`myapp://...`, from `open`, a browser or another app), including the one that launched
-    /// it: links that arrive before the app has started (its first window open, unless it's
-    /// windowless) wait for that, then run in order, each as an `AppHandle::update`. The string is passed through as received; it comes from
-    /// outside the app, so parse and validate it before acting on it. Bringing a window forward
-    /// is up to the app (`AppHandle::open` from a handle the hook's state keeps). The app's bundle must declare the scheme
-    /// (`CFBundleURLTypes`, see the README). One app per process receives links, the first that
-    /// listens; with `run_windows` it listens only once its window starts, which misses the link
-    /// that launched it. Never called on other platforms (Windows and Linux pass links to a new
+    /// it, which runs before the window's first frame. Each runs in arrival order as an
+    /// `AppHandle::update`, so a window it opens through a handle opens in the same turn. The
+    /// string is passed through as received; it comes from outside the app, so parse and
+    /// validate it before acting on it. Bringing a window forward is up to the app
+    /// (`AppHandle::open`). The app's bundle must declare the scheme (`CFBundleURLTypes`, see
+    /// the README). With several windows whose apps have the hook, the first still running
+    /// receives links. Never called on other platforms (Windows and Linux pass links to a new
     /// process as arguments).
     pub fn on_open_url(mut self, f: fn(&mut S, &str, &mut Tx)) -> Self {
         self.on_open_url = Some(f);
@@ -377,8 +377,6 @@ impl<S: 'static> App<S> {
             crate::render::discard_prewarm();
             crate::tooling::try_headless(self, args)
         } else {
-            // Before the event loop, so the link that launched the app arrives too.
-            crate::open_url_in::listen(&self);
             crate::window::run(self, args)
         }
     }
@@ -614,6 +612,21 @@ impl<S> Shared<S> {
         std::mem::take(&mut self.requests.lock().unwrap())
     }
 
+    /// The queued updates alone; the other requests stay.
+    pub(crate) fn take_updates(&self) -> Vec<Update<S>> {
+        std::mem::take(&mut self.requests.lock().unwrap().updates)
+    }
+
+    /// Runs the queued updates with `run`, then takes the other requests, so a window an update
+    /// opens (or shows, focuses, places, quits) applies in this turn. Updates the updates queue
+    /// wait for the next turn, which their wake brings.
+    pub(crate) fn drain(&self, mut run: impl FnMut(Update<S>)) -> Requests<S> {
+        for f in self.take_updates() { run(f); }
+        let mut requests = self.requests.lock().unwrap();
+        let later = std::mem::take(&mut requests.updates);
+        std::mem::replace(&mut *requests, Requests { updates: later, ..Requests::default() })
+    }
+
     /// Queues `f` for the next `take`, as `AppHandle::update_if` does, without waking the loop.
     pub(crate) fn queue_update(&self, f: Update<S>) {
         self.requests.lock().unwrap().updates.push(f);
@@ -751,6 +764,25 @@ mod tests {
             Some(WindowRequest::Open(None)),
             "an empty token is no token"
         );
+    }
+
+    #[test]
+    fn a_window_an_update_opens_applies_in_the_same_drain() {
+        let app = App::new(spec()).windowless();
+        let handle = app.handle();
+        let inner = handle.clone();
+        handle.update(move |n, _| {
+            *n += 1;
+            inner.open();
+            inner.update(|n, _| *n += 10);
+        });
+        let mut n = 0;
+        let requests = app.shared.drain(|f| { f(&mut n, &mut Tx::default()); });
+        assert_eq!(n, 1);
+        assert_eq!(requests.window, Some(WindowRequest::Open(None)), "the open applies this turn");
+        let next = app.shared.take();
+        assert_eq!(next.updates.len(), 1, "an update's own update waits for the next turn");
+        assert!(next.window.is_none());
     }
 
     #[test]

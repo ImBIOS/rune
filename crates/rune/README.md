@@ -528,14 +528,15 @@ app.run();
   have no reopen, so the hook never runs there. Headless scripts send it with `{"reopen": true}`.
 - Links opened with the app (macOS): `App::on_open_url(|s, url: &str, tx| ..)` runs on the main
   thread for each `myapp://...` link the system hands the app (`open`, a browser, another app),
-  including the one that launched it. winit 0.30 doesn't forward them, so `App::run` installs a
-  get-URL Apple event handler before the event loop starts, only when the hook is set. Links that
-  arrive before the app has started (its first window open, unless it's windowless) wait for that
-  and then run in order; later ones wake the loop. Each runs as an `AppHandle::update`, so its changes commit and redraw. One app per
-  process receives links, the first that listens; under `run_windows` it listens when its
-  window starts, after launch, so the launching link is missed. The string is passed through
-  untouched: it comes from anyone who can run `open`, so parse and validate it before acting.
-  Rune doesn't bring a window forward; keep an `AppHandle` and call `open()` if the app should.
+  including the one that launched it. winit 0.30 doesn't forward them, so Rune installs a
+  get-URL Apple event handler before the event loop starts and keeps links until a window whose
+  app has the hook starts; that link then runs before the window's first frame. If no window has
+  the hook, the handler is removed once launch is over, and an app that installed its own handler
+  before `run` keeps it. Each link runs as an `AppHandle::update`, in arrival order, so its
+  changes commit and redraw, and later ones wake the loop. With several windows whose apps have
+  the hook (`run_windows`, `App::window`), the first still running receives links. The string is
+  passed through untouched: it comes from anyone who can run `open`, so parse and validate it
+  before acting. Rune doesn't bring a window forward; call `AppHandle::open()` if the app should.
   Rune doesn't bundle apps, so the app's `Info.plist` declares the scheme:
 
   ```xml
