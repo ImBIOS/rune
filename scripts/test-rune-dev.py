@@ -114,6 +114,35 @@ class ArgumentTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(SystemExit), patch("sys.stderr"):
                 dev.parse(bad)
 
+    def test_local_runs_take_the_flag_or_the_environment_but_not_desk(self):
+        argv = ["--manifest-path", "app/Cargo.toml", "--patch", "src/view.rs"]
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RUNE_DEV_LOCAL", None)
+            self.assertFalse(dev.parse(argv).local)
+            self.assertTrue(dev.parse([*argv, "--local"]).local)
+            os.environ["RUNE_DEV_LOCAL"] = "1"
+            self.assertTrue(dev.parse(argv).local)
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            dev.parse([*argv, "--local", "--desk"])
+
+    def test_a_local_run_rebuilds_after_a_restart_and_returns_the_apps_exit(self):
+        with patch.dict(os.environ, {}, clear=False), patch.object(dev, "run", side_effect=[dev.Restart(), dev.Restart(), 3]) as run, patch("sys.stdout", io.StringIO()) as out:
+            os.environ.pop("RUNE_DEV_WRAP", None)
+            self.assertEqual(dev.local(["--local"]), 3)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(out.getvalue().count("rune-dev: restarting with the new build"), 2)
+
+    def test_a_local_run_execs_itself_once_under_the_wrap_prefix(self):
+        with patch.dict(os.environ, {"RUNE_DEV_WRAP": "lease --kind build --"}, clear=False), patch.object(dev.os, "execvp") as execvp:
+            os.environ.pop("RUNE_DEV_WRAPPED", None)
+            execvp.side_effect = SystemExit(0)
+            with self.assertRaises(SystemExit):
+                dev.local(["--local", "--", "a"])
+            command = execvp.call_args.args[1]
+            self.assertEqual(command[:5], ["lease", "--kind", "build", "--", "python3"])
+            self.assertEqual(command[-3:], ["--local", "--", "a"])
+            self.assertEqual(os.environ["RUNE_DEV_WRAPPED"], "1")
+
     def test_remote_arguments_name_the_staged_crate_and_park_the_build_copy(self):
         opts = dev.parse(["--manifest-path", "/w/app/Cargo.toml", "--patch", "src/ui/**/*.rs", "--port", "9", "--", "--fixture", "f.json"])
         with patch.object(dev, "EXTERNAL", dev.External(Path("/w"), "external/app", ["app"], [])):

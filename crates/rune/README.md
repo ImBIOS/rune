@@ -2236,6 +2236,16 @@ Homebrew/Deno command with the same name is unrelated. The first build is a full
 development build; subsequent runs reuse `target/rune-dev/<example>`.
 Compiler artifacts live in `target/live-edit-build`.
 
+`--local` (or `RUNE_DEV_LOCAL=1`) skips the worker setup: the compiler, the edit guard and
+the app all run on this machine, and an edit that needs a restart rebuilds and relaunches the
+app instead of asking you to rerun. `RUNE_DEV_WRAP` runs all of that under a command prefix
+(a build-queue lease, say); without it, it runs on plain `cargo`. `scripts/rune-hot` is the
+same with shorter flags, for an app's own scripts:
+
+```sh
+scripts/rune-hot --manifest ../my-app/Cargo.toml --patch src/view.rs [--patch …] [--port 18745] [-- APP ARGS]
+```
+
 The `hot` feature is opt-in. Feature-off builds have no patch dependencies, connection,
 dispatch, generation checks or extra runtime fields. Goldens use feature-off builds.
 
@@ -2291,7 +2301,8 @@ mirror. It accepts function-body changes in Settings' `main.rs`. Use stable keys
 function signatures, imports, constants, const-fn bodies, impl methods, startup code, dependencies,
 assets or framework code. This catches same-size field/type changes too; `size_of`
 alone cannot. Syntax errors stay outside the mirror until fixed. Stop and rerun the
-command after an incompatible change. State is not migrated across restarts.
+command after an incompatible change (`--local` and `scripts/rune-hot` rebuild and relaunch
+on their own). State is not migrated across restarts.
 Function attributes other than `doc`, `inline`, `cold` and `allow` also keep the whole
 body in the restart contract, since attribute macros can generate persistent types.
 

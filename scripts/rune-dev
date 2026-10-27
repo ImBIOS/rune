@@ -8,6 +8,9 @@ Only view function bodies can patch. All other build inputs require a restart.
   rune-dev --manifest-path APP/Cargo.toml --patch 'src/ui/*.rs' [--bin B] [--features F] [-- APP ARGS]
 
 --desk compiles on the build Mac but runs the app on this Mac, patching it over an SSH tunnel.
+--local (or RUNE_DEV_LOCAL=1) compiles and runs the app on this machine, with no build Mac, and
+rebuilds and relaunches it after an edit that needs a restart. RUNE_DEV_WRAP runs that under a
+command prefix (a build-queue lease, say); by default it's plain cargo.
 """
 import argparse
 from dataclasses import dataclass
@@ -171,6 +174,8 @@ def parse(argv):
                         help="files, relative to the app crate, whose fn bodies patch live (repeatable; ** spans directories)")
     parser.add_argument("--port", type=int, default=18744)
     parser.add_argument("--desk", action="store_true", help="run the app on this Mac and compile on --build-host")
+    parser.add_argument("--local", action="store_true", default=bool(os.environ.get("RUNE_DEV_LOCAL")),
+                        help="compile and run here; a restart-needed edit rebuilds and relaunches (env RUNE_DEV_LOCAL)")
     parser.add_argument("--build-host", default=os.environ.get("RUNE_DEV_BUILD_HOST", "pro"), help="SSH host (env RUNE_DEV_BUILD_HOST)")
     split = argv.index("--") if "--" in argv else len(argv)
     opts, unknown = parser.parse_known_args(argv[:split])
@@ -182,6 +187,8 @@ def parse(argv):
         parser.error("--manifest-path needs at least one --patch GLOB; every other file restarts")
     if opts.example and (opts.patch or opts.package or opts.bin or opts.features):
         parser.error("--patch, --package, --bin and --features are for --manifest-path")
+    if opts.local and opts.desk:
+        parser.error("--local runs everything here; --desk compiles on --build-host")
     opts.parser = parser
     return opts
 
@@ -811,14 +818,33 @@ def relay(argv):
         return process.returncode
 
 
+class Restart(Exception):
+    """A local run's edit needs a new build."""
+
+
+def local(argv):
+    """Compiles and runs the app here, rebuilding and relaunching it after a restart-needed edit."""
+    wrap = os.environ.get("RUNE_DEV_WRAP")
+    if wrap and not os.environ.get("RUNE_DEV_WRAPPED"):
+        os.environ["RUNE_DEV_WRAPPED"] = "1"
+        command = [*shlex.split(wrap), "python3", str(Path(__file__).resolve()), *argv]
+        os.execvp(command[0], command)
+    while True:
+        try:
+            return run(argv)
+        except Restart:
+            print("rune-dev: restarting with the new build", flush=True)
+
+
 def run(args):
     global EXTERNAL
-    if "studio" in socket.gethostname().lower():
-        raise SystemExit("rune-dev: compiler and renderer must stay on Pro; restart without RUNE_DEV_LEASE")
     opts = parse(args)
+    if not opts.local and "studio" in socket.gethostname().lower():
+        raise SystemExit("rune-dev: compiler and renderer must stay on Pro; restart without RUNE_DEV_LEASE")
     parser = opts.parser
-    # The build Mac's copy parks in desk mode, so it needs no app arguments.
-    app_args = app_argv(opts, ROOT) if not opts.desk else (["--hot"] if opts.example else [])
+    # The build Mac's copy parks in desk mode, so it needs no app arguments. A local run's file
+    # flags are relative to where it was started.
+    app_args = app_argv(opts, Path.cwd() if opts.local else ROOT) if not opts.desk else (["--hot"] if opts.example else [])
     env = dict(os.environ, RUSTC_WRAPPER="", CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2", RUNE_DEV_GUARDED="1", RUNE_HOT="1",
                CARGO_TARGET_DIR=str(ROOT / "target/live-edit-build"))
     env.pop("RUNE_HOT_PARK", None)
@@ -890,6 +916,8 @@ def run(args):
                 incompatible = (set(current) ^ set(baseline)) | {p for p in changed if not allowed(p)}
                 if incompatible:
                     print("rune-dev: restart needed: " + ", ".join(sorted(incompatible)), flush=True)
+                    if opts.local:
+                        raise Restart()
                     return
                 for p in changed:
                     candidate.write_bytes(current[p])
@@ -915,8 +943,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     try:
+        ours = sys.argv[1:sys.argv.index("--")] if "--" in sys.argv else sys.argv[1:]
+        if "--local" in ours or os.environ.get("RUNE_DEV_LOCAL"):
+            sys.exit(local(sys.argv[1:]))
         if not os.environ.get("RUNE_DEV_LEASE"):
-            ours = sys.argv[1:sys.argv.index("--")] if "--" in sys.argv else sys.argv[1:]
             if "--desk" in ours or "studio" in socket.gethostname().lower():
                 sys.exit(relay(sys.argv[1:]))
             os.environ["HIVEMIND_STRICT_PIN"] = "1"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Hot reload for a Rune app, compiled and run on this machine: `scripts/rune-dev --local` under the
+# flags apps already pass. Saved edits to function bodies in the --patch files patch into the open
+# window; any other edit rebuilds and restarts the app, so apps should restore their own state
+# (tabs, route, drafts) at launch.
+#   scripts/rune-hot --manifest app/Cargo.toml --patch src/view.rs [--patch …] [--port 18745] \
+#     [-- APP ARGS]
+# Needs Dioxus CLI 0.7.10 as `dx` in Cargo's bin directory (RUNE_DX overrides the path).
+# RUNE_DEV_WRAP runs the build and the app under a command prefix (a build-queue lease, say);
+# without it they run under plain cargo.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+manifest="" port=18745 patches=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --manifest) manifest=$2; shift 2 ;;
+    --patch) patches+=(--patch "$2"); shift 2 ;;
+    --port) port=$2; shift 2 ;;
+    --) shift; break ;;
+    *) echo "rune-hot: unknown flag $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n $manifest ]] || { echo "rune-hot: --manifest is required" >&2; exit 2; }
+exec python3 "$here/rune-dev" --local --manifest-path "$manifest" ${patches[@]+"${patches[@]}"} --port "$port" -- "$@"
