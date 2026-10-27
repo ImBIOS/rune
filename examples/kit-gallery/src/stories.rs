@@ -1348,7 +1348,7 @@ fn segmented_controlled(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
         )
 }
 
-/// Deadbolt's copy label and countdown, sans and mono. Each press of "Roll" advances one step:
+/// A copy label and countdown, sans and mono. Each press of "Roll" advances one step:
 /// "Copy password" → "Copied, clears in 0:30" → "… 0:29", and the countdown "0:30" → "0:29" → ….
 fn rolling_text_basic(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
     let step: u32 = s.picked("roll", "0").parse().unwrap_or(0);

@@ -1908,7 +1908,7 @@ $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
                                  # fill/text colour, hover/press, moving
-$S --trace run.jsonl             # motion-trace JSONL (Scrawl's format); keyed elements only
+$S --trace run.jsonl             # motion-trace JSONL (the app trace format); keyed elements only
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
 L=target/release/launcher        # every window of a multi-window app, composited over a backdrop
 $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/demo.json \

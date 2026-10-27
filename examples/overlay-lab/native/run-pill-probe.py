@@ -1,7 +1,7 @@
 """Compare the installed Metal pill; caller holds /tmp/pro-gui.lock on the authorized Mac.
 
-Endpoint is native orderFrontRegardless entry during Scrawl's already-visible panel sync,
-not the beginning of Scrawl's coordinator request. No redraw assistance is injected.
+Endpoint is native orderFrontRegardless entry during an app's already-visible panel sync,
+not the beginning of the app's coordinator request. No redraw assistance is injected.
 """
 import hashlib, json, math, os, pathlib, re, statistics, subprocess, sys
 
@@ -15,11 +15,11 @@ args = [str(binary), 'lab', 'pill', 'tap-then-screen', '--repeat', '30',
 run = subprocess.run(args, env=env, capture_output=True, text=True, timeout=160)
 (root/'presentation.log').write_text(run.stdout+run.stderr)
 (root/'load-after.txt').write_bytes(subprocess.check_output(['top','-l','1','-n','0']))
-if run.returncode: raise RuntimeError(f'Scrawl lab exited {run.returncode}; see presentation.log')
+if run.returncode: raise RuntimeError(f'Reference app lab exited {run.returncode}; see presentation.log')
 fronts, frames = [], []
 for line in run.stderr.splitlines():
     front = re.match(r'probe front window=(\d+) requested=([\d.]+) was_visible=1 panel=1 level=30 view=(.*)',line)
-    if front and 'ScrawlPillView' in front[3]: fronts.append((int(front[1]),float(front[2])))
+    if front and 'PillView' in front[3]: fronts.append((int(front[1]),float(front[2])))
     frame = re.match(r'probe presented window=(\d+) acquired=([\d.]+) presented=([\d.]+)',line)
     if frame: frames.append((int(frame[1]),float(frame[2]),float(frame[3])))
 trials = []

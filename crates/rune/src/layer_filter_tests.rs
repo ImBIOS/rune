@@ -281,7 +281,7 @@ pub(super) fn gpu_time(gpu: &Gpu, mut draw: impl FnMut(&mut wgpu::CommandEncoder
 }
 
 #[test]
-#[ignore = "manual 400x40pt Scrawl pill and oversized 400x120pt stress fixture at 2x"]
+#[ignore = "manual 400x40pt pill and oversized 400x120pt stress fixture at 2x"]
 fn pill_blur_gpu_cost() {
     let gpu = Gpu::headless();
     eprintln!("adapter: {:?}", gpu.adapter.get_info());

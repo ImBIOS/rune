@@ -23,7 +23,7 @@ from perf_binary import perf_binary
 parser = argparse.ArgumentParser()
 parser.add_argument("out", type=Path)
 parser.add_argument("rune", type=Path)
-parser.add_argument("--scrawl", type=Path)
+parser.add_argument("--reference", type=Path)
 parser.add_argument("--modes", default="injected,native")
 parser.add_argument("--display-link", choices=["cv", "ca"], default="cv")
 parser.add_argument("--drawables", choices=["2", "3"])
@@ -66,7 +66,7 @@ def parse(path, mode):
     gaps = [(b - a) * 1000 for a, b in zip(entries, entries[1:])]
     presented = sorted(set(r["presented"] for r in valid))
     presentation_gaps = [(b - a) * 1000 for a, b in zip(presented, presented[1:])]
-    if args.guard and mode != "scrawl":
+    if args.guard and mode != "reference":
         assert guards and all(f"mode={args.guard} " in line for line in guards), "wrong admission-probe binary"
     return dict(configs=configs, clocks=clocks, guards=guards, positive=len(valid), visible_callbacks=len(selected),
                 acquisition_hz=(len(entries)-1)/(entries[-1]-entries[0]),
@@ -101,17 +101,17 @@ with open("/tmp/pro-gui.lock", "a") as lock:
                 "STEADY_RUNE_REDRAW", "STEADY_MAX_DRAWABLES", "STEADY_TRANSACTION", "PACING_NATIVE",
                 "STEADY_CA", "STEADY_CLOCK", "STEADY_DISPLAY_SYNC", "STEADY_GUARD"]:
         env.pop(key, None)
-    modes = args.modes.split(",") + (["scrawl"] if args.scrawl else [])
-    assert all(mode in ["injected", "native", "scrawl"] for mode in modes)
+    modes = args.modes.split(",") + (["reference"] if args.reference else [])
+    assert all(mode in ["injected", "native", "reference"] for mode in modes)
     results = []
     (root / "load-before.txt").write_bytes(subprocess.check_output(["top", "-l", "1", "-n", "0"]))
     try:
         for batch in range(3):
             for mode in (modes if batch % 2 == 0 else list(reversed(modes))):
-                command = [str(rune)] if mode != "scrawl" else [str(args.scrawl.resolve()), "lab", "pill",
+                command = [str(rune)] if mode != "reference" else [str(args.reference.resolve()), "lab", "pill",
                     "tap-then-screen", "--repeat", "0", "--time-scale", "1", "--no-backdrop"]
                 runenv = dict(env)
-                if mode != "scrawl":
+                if mode != "reference":
                     runenv["STEADY_CLOCK"] = "1"
                     if args.display_link == "ca": runenv["STEADY_CA"] = "1"
                     if args.drawables: runenv["STEADY_MAX_DRAWABLES"] = args.drawables
@@ -125,10 +125,10 @@ with open("/tmp/pro-gui.lock", "a") as lock:
                 with log.open("w") as output:
                     process = subprocess.Popen(command, env=runenv, stdout=output, stderr=subprocess.STDOUT)
                     try:
-                        process.wait(timeout=14 if mode == "scrawl" else 22)
-                        assert mode != "scrawl" and process.returncode == 0, (mode, process.returncode)
+                        process.wait(timeout=14 if mode == "reference" else 22)
+                        assert mode != "reference" and process.returncode == 0, (mode, process.returncode)
                     except subprocess.TimeoutExpired:
-                        if mode != "scrawl":
+                        if mode != "reference":
                             subprocess.run(["sample", str(process.pid), "1", "-file", str(root / f"{batch}-{mode}-timeout.txt")], timeout=10)
                             raise
                     finally:
@@ -146,8 +146,8 @@ with open("/tmp/pro-gui.lock", "a") as lock:
                        rune_sha256=hashlib.sha256(rune.read_bytes()).hexdigest(), runs=results,
                        experiment=dict(display_link=args.display_link, drawables=args.drawables,
                                        display_sync=args.display_sync, guard=args.guard))
-        if args.scrawl:
-            summary["scrawl_sha256"] = hashlib.sha256(args.scrawl.read_bytes()).hexdigest()
+        if args.reference:
+            summary["reference_sha256"] = hashlib.sha256(args.reference.read_bytes()).hexdigest()
         for mode in modes:
             medians = [interval["median"] for r in results if r["mode"] == mode
                        for interval in r["interval_medians"] if interval]

@@ -1786,7 +1786,7 @@ impl El {
     }
 
     /// Class and host for this subtree's trace metadata (descendants may override them).
-    /// motion-lint pairs names by class too: use `("gpui", "pill")` to match Scrawl's Metal trace.
+    /// motion-lint pairs names by class too: use `("gpui", "pill")` to match a native Metal trace.
     /// Static metadata performs no allocation, including when tracing is disabled.
     pub fn trace_namespace(mut self, class: &'static str, host: &'static str) -> Self {
         self.trace_namespace = Some((class, host));

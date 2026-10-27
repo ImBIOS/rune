@@ -469,7 +469,7 @@ fn overlay_hidden_poll_can_show_and_animate_from_the_cached_pose() {
         if stale { overlay.apply_wake(false, vec![Box::new(|s, _| { s.width = 16.0; true })]); }
         overlay.rt.state.enter = true; // External event observed by the next hidden poll.
         if queued {
-            // Scrawl's original kick: a no-op update invalidates the prepared frame
+            // An app's original kick: a no-op update invalidates the prepared frame
             // before the hidden poll commits B and requests show.
             handle.update(|_, _| {});
             let updates = std::mem::take(&mut handle.shared.requests.lock().unwrap().updates);

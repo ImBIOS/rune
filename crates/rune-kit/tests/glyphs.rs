@@ -36,7 +36,7 @@ const ALL: [&Icon; 26] = [
     &glyphs::SPARKLE,
 ];
 
-/// Glyph sizes in points (Deadbolt's 16–20 pt plus a large one) at 1× and 2×.
+/// Glyph sizes in points (a password manager's 16–20 pt plus a large one) at 1× and 2×.
 const POINTS: [u32; 3] = [16, 20, 32];
 
 fn reference(icon: &Icon, px: u32) -> Vec<u8> {

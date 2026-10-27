@@ -996,7 +996,7 @@ pub(crate) fn file_input<S: 'static>(rt: &mut Runtime<S>, step: &FileStep, at: (
 include!("tooling/parser_tests.rs");
 
 // -------------------------------------------------------------------------------------------
-// motion-lint trace (the format Scrawl writes)
+// motion-lint trace (the format apps write)
 
 pub(crate) struct Trace {
     out: std::io::BufWriter<std::fs::File>,

@@ -265,8 +265,8 @@ mod tests {
         std::array::from_fn(|i| u8::from_str_radix(&h[1 + 2 * i..3 + 2 * i], 16).unwrap())
     }
 
-    /// Deadbolt's palette: near-black, off-white and a red accent.
-    fn deadbolt(dark: bool) -> (PaletteSeed, Kit) {
+    /// A dark palette: near-black, off-white and a red accent.
+    fn red_accent(dark: bool) -> (PaletteSeed, Kit) {
         let (bg, fg) = if dark { ("#0a0a0a", "#ededed") } else { ("#ffffff", "#171717") };
         let seed = PaletteSeed { bg: hex(bg).unwrap(), fg: hex(fg).unwrap(), accent: hex("#e5484d").unwrap() };
         (seed, Kit::from_palette(seed))
@@ -274,14 +274,14 @@ mod tests {
 
     #[test]
     fn near_black_layers_step_gently_in_oklab_lightness() {
-        let (_, k) = deadbolt(true);
+        let (_, k) = red_accent(true);
         let layers = [k.c.layer_01, k.c.layer_02, k.c.layer_03, k.c.layer_04].map(srgb8);
         for (i, rgb) in layers.iter().enumerate() {
             assert!(rgb.iter().all(|&v| (0x12..=0x2a).contains(&v)), "layer_0{} is {rgb:02x?}", i + 1);
         }
         assert!(layers.windows(2).all(|w| w[0][0] < w[1][0]), "layers must rise: {layers:02x?}");
         // Light is the mirror image: a little darker per step, never grey.
-        let (_, k) = deadbolt(false);
+        let (_, k) = red_accent(false);
         let layers = [k.c.layer_01, k.c.layer_02, k.c.layer_03, k.c.layer_04].map(srgb8);
         assert!(layers.windows(2).all(|w| w[0][0] > w[1][0]), "layers must fall: {layers:02x?}");
         assert!(layers.iter().all(|rgb| rgb[0] >= 0xd8 && rgb[0] < 0xff), "{layers:02x?}");
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn borders_are_low_alpha_foreground_and_focus_is_not_the_accent() {
         for dark in [true, false] {
-            let (seed, k) = deadbolt(dark);
+            let (seed, k) = red_accent(dark);
             for border in [k.c.border_muted, k.c.border_base, k.c.border_strong] {
                 // Alpha as solved for linear-light blending (sRGB 8–20%).
                 assert!(border.a > 0.0 && border.a < 0.4, "border alpha {}", border.a);
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn dark_secondary_text_is_dimmed_foreground_not_mid_grey() {
-        let (seed, k) = deadbolt(true);
+        let (seed, k) = red_accent(true);
         let (muted, faint) = (srgb8(k.c.text_muted), srgb8(k.c.text_faint));
         assert!(muted[0] >= 0x98 && muted[0] < 0xd8, "muted {muted:02x?}");
         assert!(faint[0] < muted[0] && faint[0] >= 0x68, "faint {faint:02x?}");
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn elevation_rings_follow_border_overrides() {
-        let (_, mut k) = deadbolt(true);
+        let (_, mut k) = red_accent(true);
         let ring = |k: &Kit| k.shadow_layers(&k.elevation.floating).find(|s| s.blur == 0.0).unwrap().color;
         assert_eq!(srgb8(ring(&k)), srgb8(k.c.border_base));
         // Read directly, rings already carry the derived border (not the neutral kit's).
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn warm_palettes_keep_their_hue_in_derived_neutrals() {
-        // Deadbolt's paper: the site's own inks are #4a463f and #857f74.
+        // A warm paper palette: the site's own inks are #4a463f and #857f74.
         let bg = hex("#e8e4dc").unwrap();
         let k = Kit::from_palette(PaletteSeed { bg, fg: Color::BLACK, accent: hex("#d81414").unwrap() });
         let lch = |c: Color| {

@@ -1,5 +1,5 @@
 //! motion-lint JSONL traces, written from what was actually presented (post-snap, post-mask), with
-//! exact "this was animated on purpose" intent bits. Same format Scrawl writes
+//! exact "this was animated on purpose" intent bits. Same format apps write
 //! and `motion-lint analyze` reads.
 
 use std::fmt::Write as _;

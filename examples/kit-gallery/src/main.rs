@@ -1,8 +1,8 @@
 //! The rune-kit gallery: one scene per `@opencode/ui` Storybook story, in the story's id, so
 //! `scripts/kit-diff.py` can render both and diff them. `--kit neutral` renders the same
 //! components on Rune's core neutral theme instead of OpenCode's; `--kit palette` on
-//! `Kit::from_palette` with a near-black, off-white and red seed (Deadbolt's palette);
-//! `--kit palette black` (dark) and `--kit palette warm` (light) use Deadbolt's pure-black and
+//! `Kit::from_palette` with a near-black, off-white and red seed (a dark palette with a red accent);
+//! `--kit palette black` (dark) and `--kit palette warm` (light) use pure-black and
 //! paper seeds with ink focus rings. `--reduced-motion` renders in the runtime's reduced-motion
 //! mode.
 //!
@@ -74,7 +74,7 @@ pub fn kit(s: &G, dark: bool) -> &'static Kit {
         static L: std::sync::OnceLock<Kit> = std::sync::OnceLock::new();
         let hex = |c: &str| rune::color::hex(c).unwrap();
         let seed = |bg: &str, fg: &str, accent: &str| rune_kit::PaletteSeed { bg: hex(bg), fg: hex(fg), accent: hex(accent) };
-        // `--kit palette black|warm`: Deadbolt's pure-black and paper seeds with ink focus.
+        // `--kit palette black|warm`: pure-black and paper seeds with ink focus.
         let variant = |name: &str| rune::extra_args().iter().any(|a| a == name);
         let ink = |seed| Kit::from_palette_focus(seed, rune_kit::PaletteFocus::Ink);
         return if dark {

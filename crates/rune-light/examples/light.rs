@@ -880,7 +880,7 @@ impl Demo for GodRays {
         let hair = oklcha(1.0, 0.0, 0.0, 0.06);
         let names = [
             "Inbox", "Calendar", "Notes", "Music", "Photos", "Maps", "Files", "Terminal", "Mail", "Weather", "Clock", "Books", "Stocks", "Podcasts",
-            "Home", "Wallet", "Health", "Camera", "Code", "Fleet", "Scrawl", "Hex", "Flit", "Rune",
+            "Home", "Wallet", "Health", "Camera", "Code", "Fleet", "Chat", "Voice", "Launcher", "Rune",
         ];
         let (cols, rows) = (8usize, 3usize);
         let (cw, ch, gx, gy) = (124.0, 124.0, 28.0, 28.0);

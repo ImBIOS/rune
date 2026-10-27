@@ -12,7 +12,7 @@ other profile.
 
 ```sh
 python3 scripts/native-pacing/run.py <out> <pacing_overlay> \
-  --scrawl <path to a reference app executable>
+  --reference <path to a reference app executable>
 ```
 
 The runner checks it is on the expected GUI host, holds a GUI lock file, bounds

@@ -2,7 +2,7 @@ use rune::Shadow;
 use rune_kit::Elevation;
 
 // Exactly the public field set at 17e36cb. Deliberately exhaustive: adding a field must fail
-// compilation here rather than first in a downstream app (Deadbolt builds its own elevation).
+// compilation here rather than first in a downstream app (which builds its own elevation).
 fn legacy_elevation(ring: Shadow) -> Elevation {
     Elevation {
         raised: vec![ring],

@@ -39,7 +39,7 @@ pub enum PropClass {
     Other,
 }
 
-/// The fade that replaces travel under Reduce Motion (OpenCode `reducedFade` .20, Flit 75 ms;
+/// The fade that replaces travel under Reduce Motion (OpenCode `reducedFade` .20, 75 ms in a native app;
 /// Kit: ≈ .15–.2 s).
 pub const REDUCED_FADE: Curve = Curve::Tween { duration: 0.18, easing: Easing::EASE_IN_OUT };
 

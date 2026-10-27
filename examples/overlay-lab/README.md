@@ -193,7 +193,7 @@ endpoint separately from the alpha-only reveal; it includes work absent in norma
 
 `run-idle-probe.py` samples process CPU and interrupt wake counters over ten-second intervals,
 without redraw assistance, and counts drawable callbacks. `--modes` measures All/None/Regions.
-`run-scrawl-probe.py <installed-binary> <directory>` runs 30 `lab pill tap-then-screen`
+`run-pill-probe.py <installed-binary> <directory>` runs 30 `lab pill tap-then-screen`
 cycles of an installed reference app using the same diagnostic library without redraw
 assistance. It measures native already-visible `orderFrontRegardless` entry to positive
 presentation, not the beginning of the app's request.

@@ -507,7 +507,7 @@ export const milestones: Milestone[] = [
     id: "m4",
     title: "Kit's Mac surfaces",
     status: "later",
-    body: <p>Scrawl's pill, Flit's tray and launcher, and their settings windows, with optional Liquid Glass.</p>,
+    body: <p>An app's pill, tray and launcher, and their settings windows, with optional Liquid Glass.</p>,
   },
   {
     id: "m5",

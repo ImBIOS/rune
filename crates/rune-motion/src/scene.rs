@@ -15,7 +15,7 @@ mod travel;
 const NONE: u32 = u32::MAX;
 const B: usize = prop::BUILTIN_COUNT;
 
-/// Width-leads ratio for the X axis spring (Flit morph: `width_vd = 0.78 · vd`).
+/// Width-leads ratio for the X axis spring (native morph: `width_vd = 0.78 · vd`).
 pub const WIDTH_LEAD: f32 = 0.78;
 
 /// Where a node is in its life.

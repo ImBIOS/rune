@@ -575,7 +575,7 @@ fn keys(p: &P) -> Vec<El> {
 fn godrays(p: &P) -> Vec<El> {
     let names = [
         "Inbox", "Calendar", "Notes", "Music", "Photos", "Maps", "Files", "Terminal", "Mail", "Weather", "Clock", "Books", "Home", "Wallet",
-        "Health", "Code", "Scrawl", "Rune",
+        "Health", "Code", "Notes", "Rune",
     ];
     let mut v = vec![
         label(28.0, 70.0, "Good evening", 30.0, 600.0, p.txt),
