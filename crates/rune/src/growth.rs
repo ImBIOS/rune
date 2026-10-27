@@ -76,6 +76,12 @@ pub mod edge {
 /// `timeline.growth`: 0.32 s, bounce 0 (`row-growth.ts:6-14 @ 39eb86d`).
 pub const GROWTH: Spring = Spring::new(0.32, 0.0);
 
+/// The farthest a whole row (`El::arrives_whole`) glides in the spring's own duration. A
+/// critically damped spring opens with an acceleration of its distance over its duration squared,
+/// so a farther glide lengthens with the square root of its distance and opens no harder than one
+/// this long: a pinned viewport following a tall insert doesn't lurch as it starts.
+pub const WHOLE_REACH: f32 = 300.0;
+
 /// Speed limits in points per second (Desktop's per-frame caps × 60).
 pub mod caps {
     pub const START: f32 = 1.875 * 60.0;
@@ -114,11 +120,13 @@ pub struct GrowTrack {
     pub whole: bool,
     /// Commit spring duration floor (`Tx::motion`), so a slower transaction (`REFLOW`) slows the row too.
     pub(crate) duration: f32,
+    /// Points between the presented height and the target when it was last set (see [`WHOLE_REACH`]).
+    pub(crate) span: f32,
 }
 
 impl GrowTrack {
     pub fn settled(h: f32) -> GrowTrack {
-        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false, whole: false, duration: 0.0 }
+        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false, whole: false, duration: 0.0, span: 0.0 }
     }
 
     pub fn moving(&self) -> bool {
@@ -131,6 +139,7 @@ impl GrowTrack {
                 self.age = 0.0;
             }
             self.target = target;
+            self.span = (target - self.h).abs();
         }
     }
 
@@ -145,6 +154,7 @@ impl GrowTrack {
         } else if self.whole {
             // Content that arrived complete has nothing to read as it opens: one critically
             // damped glide on the spring, however far, which a pinned viewport follows.
+            let spring = spring.with_duration(spring.duration * (self.span / WHOLE_REACH).sqrt().max(1.0));
             let (x, v) = spring.sample(self.h, self.v, self.target, dt);
             let landed = (rem >= 0.0 && x >= self.target) || (rem <= 0.0 && x <= self.target);
             self.h = if landed { self.target } else { x };
@@ -243,7 +253,7 @@ mod tests {
         let mut t = GrowTrack { whole: true, ..GrowTrack::settled(0.0) };
         t.retarget(900.0);
         let (mut prev, mut speeds) = (0.0, Vec::new());
-        for _ in 0..120 {
+        for _ in 0..180 {
             for _ in 0..2 {
                 t.step(GROWTH, &edge::FEATHER, true);
             }
@@ -252,13 +262,38 @@ mod tests {
             prev = t.h;
         }
         let at = |s: f32| speeds.iter().take((s * 120.0) as usize).sum::<f32>();
-        assert!(at(0.5) > 0.98 * 900.0, "past the capped speed: {} pt in 0.5 s", at(0.5));
-        assert!(!t.moving(), "settled within a second");
+        assert!(at(0.6) > 0.98 * 900.0, "past the capped speed: {} pt in 0.6 s", at(0.6));
+        assert!(!t.moving(), "settled within 1.5 s");
         // One glide: speed rises, then falls, once.
         let peak = speeds.iter().enumerate().fold((0, 0.0), |m, (i, &v)| if v > m.1 { (i, v) } else { m }).0;
         assert!(speeds[..=peak].windows(2).all(|w| w[1] >= w[0] - 1e-3), "{speeds:?}");
         // (The settle snap closes the last 1/128 pt.)
         assert!(speeds[peak..].windows(2).all(|w| w[1] <= w[0] + 1.0 / 128.0), "{speeds:?}");
+    }
+
+    #[test]
+    fn a_far_whole_glide_opens_no_harder_than_its_reach() {
+        // The largest change in per-frame step at 120 Hz.
+        let jerk = |dist: f32| {
+            let mut t = GrowTrack { whole: true, ..GrowTrack::settled(0.0) };
+            t.retarget(dist);
+            let (mut prev, mut step, mut most) = (0.0, 0.0, 0.0f32);
+            for _ in 0..360 {
+                t.step(GROWTH, &edge::FEATHER, false);
+                t.step(GROWTH, &edge::FEATHER, false);
+                most = most.max((t.h - prev - step).abs());
+                (step, prev) = (t.h - prev, t.h);
+            }
+            assert!(!t.moving(), "{dist} pt settles");
+            most
+        };
+        // The spring's opening acceleration over a reach-long glide, as a step change per frame.
+        let omega = std::f32::consts::TAU / GROWTH.duration;
+        let most = WHOLE_REACH * omega * omega / (120.0 * 120.0);
+        assert!(jerk(WHOLE_REACH / 2.0) < 0.6 * most, "a short glide keeps the spring's duration");
+        for dist in [WHOLE_REACH, 900.0, 3600.0] {
+            assert!(jerk(dist) <= most, "{dist} pt: {} vs {most}", jerk(dist));
+        }
     }
 
     #[test]
