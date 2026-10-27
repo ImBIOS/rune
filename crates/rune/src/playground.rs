@@ -74,6 +74,7 @@ pub struct Playground<S: 'static> {
     enabled: bool,
     scenes: Option<fn(&str) -> bool>,
     fresh: Option<fn(&S) -> S>,
+    keep: Option<fn(&S, &mut S)>,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -96,6 +97,7 @@ impl<S: 'static> Playground<S> {
             enabled: cfg!(debug_assertions),
             scenes: None,
             fresh: None,
+            keep: None,
         }
     }
 
@@ -141,6 +143,14 @@ impl<S: 'static> Playground<S> {
     /// `|real| real.clone()` previews them on a copy of the app as it is, its handles included.
     pub fn fresh(mut self, fresh: fn(&S) -> S) -> Self {
         self.fresh = Some(fresh);
+        self
+    }
+
+    /// Runs before a scene's stage goes, on R, another story or Back, with the stage and the
+    /// real state: what it copies over stays in the app, and the next [`Playground::fresh`]
+    /// starts from it, so tuning in the side column sticks.
+    pub fn keep(mut self, keep: fn(&S, &mut S)) -> Self {
+        self.keep = Some(keep);
         self
     }
 
@@ -251,6 +261,7 @@ pub(crate) struct Live<S: 'static> {
     bar: bool,
     init: fn() -> S,
     fresh: Option<fn(&S) -> S>,
+    keep: Option<fn(&S, &mut S)>,
     scenes: &'static [(&'static str, fn(&mut S))],
     poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Stories, as indices into scenes then pages, in the order the list shows them.
@@ -315,7 +326,7 @@ pub(crate) fn offered_by_env() -> bool {
 
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
@@ -327,6 +338,7 @@ impl<S: 'static> Live<S> {
             bar,
             init: spec.init,
             fresh,
+            keep,
             scenes: spec.scenes,
             poll: spec.poll,
             order: Vec::new(),
@@ -461,8 +473,8 @@ impl<S: 'static> Live<S> {
                         self.select(at.unwrap_or(self.selected), real);
                     }
                 }
-                Request::Close => self.close(),
-                Request::Toggle if self.open => self.close(),
+                Request::Close => self.close(real),
+                Request::Toggle if self.open => self.close(real),
                 Request::Toggle => {
                     self.open = true;
                     self.select(self.selected, real);
@@ -509,7 +521,13 @@ impl<S: 'static> Live<S> {
         }
     }
 
-    fn close(&mut self) {
+    /// [`Playground::keep`], from the scene's stage as it goes.
+    fn keep(&mut self, real: &mut S) {
+        if let (Some(keep), Some(scene)) = (self.keep, &self.scene) { keep(&scene.state, real); }
+    }
+
+    fn close(&mut self, real: &mut S) {
+        self.keep(real);
         self.open = false;
         self.header = None;
         self.folded.clear();
@@ -518,7 +536,8 @@ impl<S: 'static> Live<S> {
     }
 
     /// Shows story `i`. A stage made new, as a scene's always is, runs its `'r'` trigger.
-    fn select(&mut self, i: usize, real: &S) {
+    fn select(&mut self, i: usize, real: &mut S) {
+        self.keep(real);
         if let Some(left) = self.selected.checked_sub(self.scenes.len())
             && let (Some(Page { kind: Kind::Own(own), .. }), Some(Some(stage))) = (self.pages.get(left), self.owned.get_mut(left))
         {
@@ -536,7 +555,7 @@ impl<S: 'static> Live<S> {
                 s
             }))));
         } else if let Some((i, page)) = self.page() && let Kind::Own(own) = &page.kind && self.owned[i].is_none() {
-            let stage = crate::with_scene_clock(scene_clock, || own.init(real));
+            let stage = crate::with_scene_clock(scene_clock, || own.init(&*real));
             self.owned[i] = Some(stage);
         } else {
             return;
