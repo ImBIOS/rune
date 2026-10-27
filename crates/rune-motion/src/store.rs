@@ -172,8 +172,10 @@ pub struct AnimationStore {
     node_clock: FxMap<u64, u32>,
 
     active: Vec<u32>,
-    touched: Vec<u32>,
-    set_touched: Vec<u32>,
+    /// With the generation they had, so a track freed (or its slot reused) since drops out
+    /// where these are read, and freeing a track never scans them.
+    touched: Vec<TrackId>,
+    set_touched: Vec<TrackId>,
 
     extra: Vec<Extra>,
     extra_free: u32,
@@ -718,7 +720,9 @@ impl AnimationStore {
     pub fn tick(&mut self) {
         self.events.drain(..self.events_seen);
         self.touched.clear();
-        self.touched.extend_from_slice(&self.set_touched);
+        let meta = &self.t_meta;
+        let live = |id: &&TrackId| meta[id.index as usize].alive && meta[id.index as usize].generation == id.generation;
+        self.touched.extend(self.set_touched.iter().filter(live));
         self.set_touched.clear();
         let clocked = !self.node_clock.is_empty();
         let mut i = 0;
@@ -734,7 +738,7 @@ impl AnimationStore {
                 }
                 self.t_held[t] = frozen;
             }
-            self.touched.push(t as u32);
+            self.touched.push(TrackId { index: t as u32, generation: self.t_meta[t].generation });
             if self.t_next_due[t] <= now {
                 self.apply_due(t, now);
             }
@@ -940,7 +944,7 @@ impl AnimationStore {
             let slot = self.t_slot[t] as usize;
             self.deactivate(t, slot);
         }
-        self.set_touched.push(t as u32);
+        self.set_touched.push(TrackId { index: t as u32, generation: self.t_meta[t].generation });
     }
 
     /// Animates lanes of track `t` toward `targets`. `lane_vel` overrides per-lane start velocity.
@@ -1323,8 +1327,6 @@ impl AnimationStore {
             let slot = self.t_slot[t] as usize;
             self.deactivate(t, slot);
         }
-        self.set_touched.retain(|&x| x as usize != t);
-        self.touched.retain(|&x| x as usize != t);
         let m = self.t_meta[t];
         self.index.remove(&(m.node.0, m.prop.0));
         self.lane_free[n].push(l0 as u32);

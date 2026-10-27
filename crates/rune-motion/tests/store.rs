@@ -306,6 +306,24 @@ fn removing_and_reusing_tracks_is_generational() {
 }
 
 #[test]
+fn a_removed_track_leaves_touched_even_when_its_slot_is_reused() {
+    let mut s = AnimationStore::new();
+    s.set(NodeId(1), X, 1.0);
+    s.set(NodeId(3), X, 3.0);
+    s.tick();
+    let touched = |s: &AnimationStore| s.touched().map(|(n, _)| n.0).collect::<Vec<_>>();
+    assert_eq!(touched(&s), [1, 3]);
+    s.remove_node(NodeId(1));
+    assert_eq!(touched(&s), [3]);
+    s.set(NodeId(1), X, 1.0);
+    s.remove_node(NodeId(1));
+    // Node 2's track takes the freed slot; the old track's entry doesn't count for it.
+    s.set(NodeId(2), X, 2.0);
+    s.tick();
+    assert_eq!(touched(&s), [2]);
+}
+
+#[test]
 fn node_time_scale_holds_slows_and_resumes_in_place() {
     const M: NodeId = NodeId(8);
     let mut s = AnimationStore::new();
