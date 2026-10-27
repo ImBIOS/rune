@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Multi-click and click-drag selection in `text_input`.** Double-clicking a text field selects
+  the word under the pointer (sharing `El::selectable`'s Unicode word boundaries), triple-clicking
+  selects the line in a single-line field or the `\n`-delimited paragraph in a multi-line field,
+  dragging after a single, double or triple press extends by characters, whole words or whole
+  lines from the original unit, and Shift-clicking extends from `TextEdit::anchor`. Secure fields
+  select the whole value on double- and triple-click without marking the secret edited.
+
 - **The app takes Cmd+A and Cmd+C before selected text, and code can set and read the
   selection.** Key routing offers plain Cmd+A and Cmd+C to selectable text last, after both
   `on_key` calls and element key handlers, so an `on_key` that returns true for them now wins

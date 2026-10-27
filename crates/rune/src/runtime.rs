@@ -92,7 +92,8 @@ mod layout_read;
 #[path = "links.rs"]
 mod links;
 #[path = "selectable.rs"]
-mod selectable;
+pub(crate) mod selectable;
+mod input_click;
 #[path = "help.rs"]
 mod help;
 #[path = "runtime/scroll_edge.rs"]
@@ -1251,6 +1252,8 @@ pub struct Runtime<S: 'static> {
     sel_snapshot: std::cell::RefCell<Option<selectable::Snapshot>>,
     /// What each `El::on_selection_change` element (by path) last heard.
     sel_heard: selectable::Heard,
+    /// Multi-click and drag selection state for `text_input`.
+    input_click: input_click::InputClick,
     /// Modifier keys held now, as the window last reported them (`Tx::mods`).
     held_mods: crate::Mods,
     /// `El::help` tooltips.
@@ -1591,6 +1594,7 @@ impl<S: 'static> Runtime<S> {
             text_sel: Default::default(),
             sel_snapshot: Default::default(),
             sel_heard: Default::default(),
+            input_click: Default::default(),
             held_mods: Default::default(),
             help: Default::default(),
             help_delay: 0.5,
@@ -3043,28 +3047,7 @@ impl<S: 'static> Runtime<S> {
                 true
             }
             Action::FileDialog(id, result) => self.run_file_dialog(id, result, &mut one),
-            Action::Focus(path, x, y) => {
-                let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
-                let single = self.node(&path).and_then(|n| n.input.as_ref()).is_some_and(|i| i.single_line);
-                let layout = self.node(&path).and_then(|n| n.text_layout.clone());
-                let s = self.env.scale;
-                let scroll = self.input_scroll.get(&path).copied().unwrap_or(0.0);
-                self.set_focus(Some(path), false);
-                let e = access(handler_state(&mut self.state));
-                e.set_single_line(single);
-                e.break_history_group();
-                e.clear_pending();
-                if let Some(l) = layout {
-                    let x = x + scroll;
-                    let h = (l.height() - 1e-3).max(0.0);
-                    let ys = if single || x < 0.0 { (y * s).clamp(0.0, h) } else { (y * s).max(0.0) };
-                    let i = e.model_index(crate::text::cursor_from_point(&l, x * s, ys).index());
-                    // A click on a pill puts the caret at its nearer edge.
-                    e.set_caret(i);
-                }
-                one.instant = true;
-                true
-            }
+            Action::Focus(path, x, y) => self.focus_input(path, x, y, &mut one),
             Action::Blur => {
                 if self.focused.is_none() { return false; }
                 self.set_focus(None, self.keyboard_focus);
@@ -3320,6 +3303,7 @@ impl<S: 'static> Runtime<S> {
             return false;
         };
         let Some(access) = access else { return false };
+        self.input_click.clear_last();
         {
             let edit = access(handler_state(&mut self.state));
             edit.set_single_line(single_line);
@@ -5053,6 +5037,7 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         self.selection_drag(x, y);
+        self.input_drag(x, y, drag_move);
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
         let (id, r, has_drag) = (self.nodes[i].id, self.nodes[i].target, self.nodes[i].on_drag.is_some() && !self.drags_out(&self.nodes[i]));
         self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
@@ -5100,6 +5085,7 @@ impl<S: 'static> Runtime<S> {
         self.drop_drag_out_request();
         self.drag_out_armed = false;
         self.text_sel.dragging = false;
+        self.input_click.stop_drag();
         self.capture = None;
         self.secondary_capture = None;
         self.capture_inside = false;
@@ -5183,6 +5169,9 @@ impl<S: 'static> Runtime<S> {
         self.hover_pending.retain(|p| !p.1);
         self.hover_paused = true;
         let target = self.primary_target(x, y);
+        if target.and_then(|t| self.textbox_input(t)).is_none() {
+            self.input_click.clear();
+        }
         if let Some(i) = self.active_modal()
             && target.is_none_or(|t| !self.allowed(t))
         {
@@ -5226,10 +5215,7 @@ impl<S: 'static> Runtime<S> {
         self.press_moved = false;
         self.press_cancelled = false;
         if let Some(ji) = self.textbox_input(ti) {
-            // Its text drew scaled or rotated with its box: map the press back to the rest layout.
-            let [lx, ly] = self.to_local(ji, x, y);
-            let jn = &self.nodes[ji];
-            self.queue.push(Action::Focus(jn.path.clone(), lx - jn.inset[0], ly - jn.inset[1]));
+            self.input_down(ji, x, y);
             return;
         }
         // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
@@ -5338,6 +5324,7 @@ impl<S: 'static> Runtime<S> {
         // A drag that selected text is a selection, not a press.
         let selected = self.selected_by_drag();
         self.text_sel.dragging = false;
+        self.input_click.stop_drag();
         let Some((path, d)) = self.capture.take() else { return };
         let button = std::mem::take(&mut self.capture_button);
         self.refresh_hover_within();

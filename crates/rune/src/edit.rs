@@ -1246,6 +1246,30 @@ impl TextEdit {
         }
     }
 
+    /// The byte range of `unit` at `i`: a caret snapped off a pill's inside, a word or paragraph
+    /// grown to cover any pill it touches, or the whole text for a secure field (or a single-line
+    /// paragraph).
+    pub(crate) fn unit_at(&self, i: usize, unit: crate::runtime::selectable::Unit) -> (usize, usize) {
+        use crate::runtime::selectable::{Unit, unit_at};
+        let i = Self::clamp_char_boundary(&self.text, i);
+        if unit == Unit::Char {
+            let to = match self.pill_around(i) {
+                Some((s, e)) if i - s < e - i => s,
+                Some((_, e)) => e,
+                None => i,
+            };
+            return (to, to);
+        }
+        if self.secure || (unit == Unit::Paragraph && self.is_single_line()) {
+            return (0, self.text.len());
+        }
+        let (mut a, mut b) = unit_at(&self.text, i, unit);
+        if let Some((ps, pe)) = self.pill_around(i) {
+            (a, b) = (a.min(ps), b.max(pe));
+        }
+        self.cover_pills(a, b)
+    }
+
     pub fn selected(&self) -> &str {
         let (a, b) = self.range();
         &self.text[a..b]

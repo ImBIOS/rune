@@ -154,6 +154,9 @@ impl<S: 'static> Runtime<S> {
         crate::el::Outline { width: 3.0, offset: 0.0, color: self.system_accent.focus(self.env.system_dark) }
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
+        if self.input_click.last_path().is_some_and(|p| path.as_deref() != Some(p)) {
+            self.input_click.clear();
+        }
         if self.focused != path { self.ime_area = None; self.ime_reset = true; self.blur_links(); self.hover_focus = false; }
         // Tabbing away or into a field takes the selection's keyboard; a hovered row doesn't.
         if self.focused != path

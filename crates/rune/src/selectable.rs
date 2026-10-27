@@ -100,7 +100,7 @@ pub(super) struct Heard {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Unit {
+pub(crate) enum Unit {
     #[default]
     Char,
     Word,
@@ -147,7 +147,7 @@ fn prev_boundary(text: &str, i: usize) -> usize { floor_boundary(text, i.saturat
 /// The range of `unit` at byte `i` of `text`: a word (or run of spaces or punctuation) by
 /// Unicode word boundaries, or a paragraph with its line break. Past the end of a line (on its
 /// break, or past the end of the text) it takes the line's last word or paragraph, as AppKit does.
-fn unit_at(text: &str, i: usize, unit: Unit) -> (usize, usize) {
+pub(crate) fn unit_at(text: &str, i: usize, unit: Unit) -> (usize, usize) {
     use unicode_segmentation::UnicodeSegmentation;
     let mut i = floor_boundary(text, i);
     if i > 0 && i == text.len() && unit != Unit::Char { i = prev_boundary(text, i); }
@@ -175,7 +175,7 @@ fn unit_at(text: &str, i: usize, unit: Unit) -> (usize, usize) {
 }
 
 /// The selection a drag from unit range `origin` to unit range `at` makes: (anchor, focus).
-fn extend(origin: (usize, usize), at: (usize, usize)) -> (usize, usize) {
+pub(crate) fn extend(origin: (usize, usize), at: (usize, usize)) -> (usize, usize) {
     if at.0 < origin.0 { (origin.1, at.0) } else { (origin.0, at.1.max(origin.1)) }
 }
 
