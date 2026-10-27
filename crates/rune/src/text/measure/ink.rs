@@ -12,8 +12,8 @@ use swash::scale::image::Content;
 use swash::scale::{Render, Source, StrikeWith};
 use swash::zeno::{Format, Vector};
 
-use super::Face;
-use super::measure::with_text;
+use super::super::Face;
+use super::with_text;
 use crate::tok::TextStyle;
 
 /// Rasterizing at this many times the size puts every measurement within 1/8 pt.

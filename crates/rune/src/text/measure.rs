@@ -7,6 +7,9 @@ use std::cell::RefCell;
 use std::sync::Mutex;
 
 use super::{Span, TextSystem};
+
+mod ink;
+pub use ink::{TextInk, ink};
 use crate::tok::TextStyle;
 
 struct Fonts {
