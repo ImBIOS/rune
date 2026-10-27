@@ -58,3 +58,52 @@ drawn.
 
 `track.py` prints one element's frames (rect, opacity, flags, sampled tracks) to confirm a
 finding. Add scenarios as script JSON under `scenarios/` and a `run` line in `run.sh`.
+
+## An app's own motion gate (`rune::motion_gate`)
+
+The scenarios above are Rune's examples, recorded as traces and read by `analyze.py`. An app
+gates its own motion inside `cargo test`, on its real view and state, with `rune::motion_gate`:
+
+- `Run` wraps the app's `Runtime`: `idle` settles it unrecorded, `step`, `play` and `act` record
+  frames on the virtual clock (an `act` marks an input, so motion it retargets isn't held to one
+  path), and `quiet` marks where the cell's motion should end.
+- `check` lists what a person would see go wrong in a `Recording`: `pop-in`, `pop-out`,
+  `cut-exit`, `jump`, `offset-jump`, `appear-then-jump`, `jerk`, `reversal`, `overshoot`,
+  `jiggle`, `text-swap`, `fade-snap`, `flicker`, `load-motion`, `never-settles`, `loop-jump` and
+  `wakes-after-end`. Thresholds and meanings are the `RULES` table. Elements are tracked by tree
+  path, so a keyed row keeps its identity however the rows around it change.
+- `gate(cells, ALLOW)` runs the app's cells (a name and a closure that records one) in parallel,
+  checks them, and fails the test on any finding its allowlist doesn't cover. Each allowlist row
+  is `(kind, element contains, cell contains, why)`, and needs its reason.
+
+The app keeps its scenarios, its circumstance matrix (cell names like `send/pinned/long/wide`)
+and its allowlist; Rune keeps the checker and the runner. The module docs show a whole test.
+`gate` runs one:
+
+```sh
+scripts/motion-audit/gate -- -p my-app motion_gate                 # every cell
+scripts/motion-audit/gate send/pinned -- -p my-app motion_gate     # cells whose name contains it
+scripts/motion-audit/gate --allowed -- -p my-app motion_gate       # allowed findings too
+scripts/motion-audit/gate --dump 'send/pinned/long/wide|composer|120|160' -- -p my-app motion_gate
+scripts/motion-audit/gate --sheet 'send/pinned/long/wide|134|composer' -- -p my-app motion_gate
+```
+
+`--dump` writes one cell's tracks frame by frame (rect, visible rect, opacity, scale, flags);
+`--sheet` writes a PNG strip of the frames around one, every element outlined as strongly as
+its opacity and the named one in red. Both are evidence for reading a finding; the findings
+are the gate. `MOTION_GATE_OUT` names the report (default `$TMPDIR/motion-gate`), and
+`MOTION_GATE_WRAP` runs the test under a command prefix.
+
+## Tracing the real app (`motion-trace.py`)
+
+The gate runs headless on the virtual clock, so it says nothing about how long a real frame
+takes. For that, an app can write its own trace in the installed build, one JSON line per key,
+span and frame (the format is at the top of `motion-trace.py`), and read it:
+
+```sh
+python3 scripts/motion-audit/motion-trace.py trace.jsonl --key Enter --frames 40 --budget 16.7
+```
+
+For each matching key it prints how many frames passed before a watched element moved, then
+each frame's update and render cost, marking the ones over budget, with the spans over 1 ms in
+them.

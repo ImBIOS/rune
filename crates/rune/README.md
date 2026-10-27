@@ -2143,6 +2143,10 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   Build `target/perf/settings` with `--profile perf`. Then `python3 scripts/bench-startup.py --out perf/startup` times
   fresh process launch to that marker (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
    This measures process-cold startup with warm OS/driver caches, not physical display presentation.
+- **Motion gate**: `rune::motion_gate` records an app's real `Runtime` frame by frame in its own
+  `cargo test` and fails on motion a person would notice (pops, jumps, overshoot, flicker,
+  motion that never settles) unless the app's allowlist gives a reason. `scripts/motion-audit/gate`
+  runs it with a cell filter and dump or contact-sheet evidence; see `scripts/motion-audit/README.md`.
 - **Trace quality**: `python3 scripts/trace-quality.py run.jsonl` reports scene-edge error against
   analytic samples, inherited spatial spring velocity error at retarget, CPU budget excess, and
   virtual cadence. Growth/scroll are renderer-owned and excluded from the analytic edge metric;

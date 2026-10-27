@@ -98,6 +98,7 @@ mod key_diagnostics;
 pub mod growth;
 pub mod live;
 pub mod memo;
+pub mod motion_gate;
 mod pixels;
 pub mod gpu_springs;
 pub mod image;

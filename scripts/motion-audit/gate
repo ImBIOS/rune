@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Runs an app's motion gate (`rune::motion_gate::gate` in one of its tests) and prints one line per
+# finding: kind, element, frame, detail and cell. Everything after `--` goes to `cargo test`, so it
+# names the app's package and test:
+#   scripts/motion-audit/gate [CELL-FILTER] -- -p my-app motion_gate
+#   scripts/motion-audit/gate --sheet 'add-row/wide|134[|path part]' -- -p my-app motion_gate
+#   scripts/motion-audit/gate --dump 'add-row/wide|path part[|from|to]' -- -p my-app motion_gate
+#   scripts/motion-audit/gate --allowed [CELL-FILTER] -- …   also list allowlisted findings
+# `--sheet` writes a contact strip of the frames around one, the path part's outlines in red;
+# `--dump` writes those tracks' frames. Both name a cell, which is also the filter.
+# MOTION_GATE_OUT names the report file (default $TMPDIR/motion-gate). MOTION_GATE_WRAP runs the
+# test under a command prefix (a build-queue lease, say); without it, it's plain cargo.
+set -euo pipefail
+OUT=${MOTION_GATE_OUT:-${TMPDIR:-/tmp}/motion-gate}
+export MOTION_GATE_OUT=$OUT
+filter=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sheet) export MOTION_GATE_SHEET=$2; filter=${2%%|*}; shift 2 ;;
+    --dump) export MOTION_GATE_DUMP=$2; filter=${2%%|*}; shift 2 ;;
+    --allowed) export MOTION_GATE_ALLOWED=1; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --) shift; break ;;
+    *) filter=$1; shift ;;
+  esac
+done
+[[ $# -gt 0 ]] || { echo "motion gate: name the app's test after --, e.g. -- -p my-app motion_gate" >&2; exit 2; }
+export MOTION_GATE=$filter
+rm -f "$OUT" "$OUT.sheet.png" "$OUT.dump"
+wrap=()
+[[ -n ${MOTION_GATE_WRAP:-} ]] && read -r -a wrap <<<"$MOTION_GATE_WRAP"
+status=0
+${wrap[@]+"${wrap[@]}"} cargo test -q "$@" >/dev/null 2>&1 || status=$?
+if [[ -s "$OUT" ]]; then cat "$OUT"; else echo "motion gate: the test didn't run (exit $status); run cargo test $* to see why" >&2; exit 1; fi
+[[ -f "$OUT.sheet.png" ]] && echo "sheet: $OUT.sheet.png"
+[[ -f "$OUT.dump" ]] && echo "dump: $OUT.dump"
+exit $status
