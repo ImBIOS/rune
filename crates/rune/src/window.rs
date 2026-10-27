@@ -27,6 +27,17 @@ use crate::surface_stats::{Pacing, SurfaceMeter, SurfaceStats};
 use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
 use crate::windows::{AnyWindowSpec, Display, WindowOptions, WindowSpec};
 
+#[cfg(target_os = "macos")]
+mod launch_drawables;
+#[cfg(target_os = "macos")]
+use launch_drawables::LaunchDrawables;
+mod presented;
+use presented::Presented;
+mod platform_sync;
+use platform_sync::sync_platform;
+#[cfg(test)]
+mod tests;
+
 /// The open window. Fields drop in order: the surface before its window.
 struct Win {
     first_frame: FirstFrame,
@@ -1304,30 +1315,6 @@ fn setup_waker<S: 'static>(shared: &Arc<crate::app::Shared<S>>) -> Waker {
 /// ended, as Core Animation's time-based motion has by the time a covered window shows again.
 pub(crate) fn covered_step<S: 'static>(rt: &mut Runtime<S>) { rt.hidden_wake(); }
 
-/// What a built frame hands the window besides its pixels: secure input, the IME, the cursor,
-/// help tags and the clipboard.
-fn sync_platform<S: 'static>(l: &mut Win, rt: &mut Runtime<S>, secure_input: &mut crate::secure_input::SecureInput,
-    ime: &mut bool, clipboard: &crate::clipboard::Client) {
-    let focused = l.window.has_focus();
-    secure_input.set(rt.has_secure_focus() && focused);
-    let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && focused;
-    if std::mem::take(&mut rt.ime_reset) || ime_allowed != *ime {
-        l.window.set_ime_allowed(false);
-        l.window.set_ime_allowed(ime_allowed);
-        *ime = ime_allowed;
-    }
-    l.apply_cursor(rt, focused);
-    #[cfg(target_os = "macos")]
-    l.help.sync(&l.window, rt.help_regions());
-    clipboard.flush(rt);
-    if let Some(a) = rt.ime_area {
-        l.window.set_ime_cursor_area(
-            LogicalPosition::new(a[0] as f64, a[1] as f64),
-            LogicalSize::new(a[2] as f64, a[3] as f64),
-        );
-    }
-}
-
 #[cfg(test)]
 mod covered {
     use super::*;
@@ -1436,83 +1423,6 @@ fn drain_frame(launcher: bool, visible: bool, was_shown: bool, changed: bool, qu
     !quiet && if launcher { changed || was_shown && visible } else { visible }
 }
 
-#[test]
-fn updates_that_change_nothing_ask_no_window_for_a_frame() {
-    use crate::{App, AppSpec, el};
-    let app = App::new(AppSpec::new("t", (10.0, 10.0), || 0u32, |_, _| el()));
-    let (handle, shared) = (app.handle(), app.shared.clone());
-    let mut rt = Runtime::new(0u32, |_, _| el(), (10.0, 10.0), crate::Env::default());
-    rt.frame(0.0);
-    // As `Host::drain`, for 100 timer ticks that found nothing new.
-    for _ in 0..100 {
-        handle.update_if(|_, _| false);
-        let mut requests = shared.take();
-        let mut updated = false;
-        for f in std::mem::take(&mut requests.updates) { updated |= rt.update_if(f); }
-        let quiet = !updated && requests.only_updates() && !rt.patch_pending() && !rt.needs_commit();
-        for (launcher, visible) in [(false, true), (true, true), (true, false), (false, false)] {
-            assert!(!drain_frame(launcher, visible, visible, updated, quiet), "launcher {launcher} visible {visible}");
-        }
-    }
-    handle.update_if(|_, _| false);
-    handle.wake();
-    assert!(!shared.take().only_updates(), "`wake` still runs a shown window's poll");
-    handle.update_if(|_, _| false);
-    setup_waker(&shared)();
-    assert!(!shared.take().only_updates(), "so does `setup`'s waker");
-    assert!(drain_frame(false, true, true, false, false) && drain_frame(true, false, false, true, false));
-}
-
-/// A stream of updates that change nothing, faster than a frame, on a host that neither polls
-/// nor draws for them, doesn't push back a due timer, and one's own `wake_after(ZERO)` after
-/// idle is due at once.
-#[test]
-fn updates_that_change_nothing_do_not_delay_due_timers() {
-    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
-    rt.wall_start = Some(Instant::now());
-    rt.frame(0.0);
-    // A second idle since that frame.
-    rt.wall_start = rt.wall_start.map(|t| t - Duration::from_secs(1));
-    let polled = rt.polled_at();
-    rt.update_if(|_, tx| { tx.wake_after(Duration::ZERO); false });
-    rt.schedule_pending_wakes();
-    let due = timer_deadline(&rt).expect("armed");
-    assert!(due <= Instant::now(), "due now, not a frame interval from now");
-    for _ in 0..20 {
-        std::thread::sleep(Duration::from_millis(2));
-        rt.update_if(|_, _| false);
-        rt.schedule_pending_wakes();
-        assert_eq!(timer_deadline(&rt), Some(due));
-    }
-    assert_eq!(rt.polled_at(), polled, "the clock stays at the last poll");
-}
-
-/// `wake_after(Duration::ZERO)` from the poll: a running display link takes it as the next
-/// frame; any host without one waits a frame interval from the poll, never `now`.
-#[test]
-fn a_timer_asking_for_the_next_frame_waits_a_frame_without_a_display_link() {
-    fn poll(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(Duration::ZERO); false }
-    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
-    rt.poll = Some(poll);
-    let start = Instant::now() - Duration::from_secs(1);
-    rt.wall_start = Some(start);
-    rt.frame(0.0);
-    assert_eq!(rt.state, 1);
-    let due = wall_wake_deadline(&rt).expect("armed");
-    let polled = start + Duration::from_secs_f64(rt.polled_at());
-    assert!(due <= polled + Duration::from_micros(1), "due at once on the runtime's clock");
-    let wait = timer_deadline(&rt).expect("armed");
-    assert!(wait >= polled + TIMER_FRAME - Duration::from_micros(1) && wait <= polled + TIMER_FRAME + Duration::from_micros(1));
-    assert!(timer_wants_frame(&rt, Some(polled + Duration::from_millis(8))), "a paced surface draws it next tick");
-    assert!(!timer_wants_frame(&rt, None), "an unpaced one doesn't keep the loop turning");
-    // A timer longer than a frame keeps its own time.
-    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
-    rt.wall_start = Some(start);
-    rt.update(|_, tx| tx.wake_after(Duration::from_millis(100)));
-    rt.frame(0.0);
-    assert_eq!(timer_deadline(&rt), wall_wake_deadline(&rt));
-}
-
 /// A vsynced sRGB (or non-sRGB when `srgb_blend` is set) configuration for the surface, and the
 /// first alpha mode it supports that composites translucent pixels.
 pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32), srgb_blend: bool)
@@ -1537,157 +1447,6 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     let translucent = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
         .into_iter().find(|mode| caps.alpha_modes.contains(mode));
     Some((config, translucent))
-}
-
-/// A new window's surface keeps two drawables until the window first rests on screen, or for
-/// its first second there, then its configured three. CAMetalLayer makes another window-sized
-/// drawable whenever a frame is acquired while the others are still held, and keeps it. Launch
-/// frames overlap that way, presented before the window server shows the window or while their
-/// shaders compile, which left a settled window one drawable (about 12 MB at 980x760) heavier.
-/// Raising the count later makes no drawable until a frame needs it.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LaunchDrawables {
-    Capped { steady: u32, since: Option<Instant> },
-    Steady,
-}
-
-#[cfg(target_os = "macos")]
-impl LaunchDrawables {
-    const LAUNCH: Duration = Duration::from_secs(1);
-
-    /// Caps a new surface's `config` at two drawables.
-    fn cap(config: &mut wgpu::SurfaceConfiguration) -> Self {
-        if config.desired_maximum_frame_latency <= 1 { return Self::Steady; }
-        let steady = std::mem::replace(&mut config.desired_maximum_frame_latency, 1);
-        Self::Capped { steady, since: None }
-    }
-
-    /// After a frame on screen: the frame latency to configure, once, when launch ends.
-    fn settle(&mut self, idle: bool, now: Instant) -> Option<u32> {
-        let Self::Capped { steady, since } = self else { return None };
-        let since = *since.get_or_insert(now);
-        if !idle && now.duration_since(since) < Self::LAUNCH { return None; }
-        let steady = *steady;
-        *self = Self::Steady;
-        Some(steady)
-    }
-}
-
-/// What an idle window's last frame drew. A timer that wakes the window builds a frame before
-/// taking a drawable; when it would draw these same pixels, nothing is acquired or presented.
-struct Presented {
-    instances: Vec<crate::render::Instance>,
-    clear: [f32; 4],
-    size: (u32, u32),
-    format: wgpu::TextureFormat,
-    srgb: bool,
-    scale: f32,
-    transparent: bool,
-}
-
-impl Presented {
-    fn record<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) {
-        let (clear, size, srgb, scale, transparent) = (rt.clear_color(), (config.width, config.height), rt.srgb_blend(), rt.env.scale, rt.transparent);
-        match this {
-            Some(p) => {
-                p.instances.clone_from(&rt.instances);
-                (p.clear, p.size, p.format, p.srgb, p.scale, p.transparent) = (clear, size, config.format, srgb, scale, transparent);
-            }
-            None => *this = Some(Self { instances: rt.instances.clone(), clear, size, format: config.format, srgb, scale, transparent }),
-        }
-    }
-
-    /// Whether `rt`'s built frame draws what this one did: the same instances into the same
-    /// surface, with no glyph or image upload waiting, and nothing drawn outside the instances
-    /// (`SurfaceDraw` content, native materials).
-    fn same<S: 'static>(&self, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) -> bool {
-        let atlas = &rt.text.atlas;
-        self.size == (config.width, config.height) && self.format == config.format && self.srgb == rt.srgb_blend()
-            && self.scale == rt.env.scale && self.clear == rt.clear_color() && self.transparent == rt.transparent
-            && rt.surfaces.is_empty() && rt.materials.is_empty()
-            && atlas.dirty.is_none() && atlas.pages.iter().all(|p| p.dirty.is_none())
-            && rt.images.pages.iter().all(|p| p.dirty.is_none())
-            && bytemuck::cast_slice::<_, u8>(&self.instances) == bytemuck::cast_slice::<_, u8>(&rt.instances)
-    }
-}
-
-#[test]
-fn a_frame_that_draws_the_same_pixels_is_the_same() {
-    use crate::{Color, el};
-    fn view(n: &u32, _: &mut crate::Cx<u32>) -> crate::El {
-        el().key("root").size(200.0, 100.0).child(el().key("box").size(40.0 + *n as f32, 40.0).fill(Color { r: 0.3, g: 0.5, b: 0.9, a: 1.0 }))
-    }
-    let mut rt = Runtime::new(0u32, view, (200.0, 100.0), crate::Env::new(false, 2.0));
-    rt.frame(0.0);
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        width: 400,
-        height: 200,
-        present_mode: wgpu::PresentMode::AutoVsync,
-        desired_maximum_frame_latency: 2,
-        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-        view_formats: vec![],
-        color_space: Default::default(),
-    };
-    let mut presented = None;
-    Presented::record(&mut presented, &rt, &config);
-    let p = presented.as_ref().unwrap();
-
-    // A poll that says it changed state, but the view draws the same.
-    rt.update(|_, _| {});
-    rt.frame(0.0);
-    assert!(p.same(&rt, &config), "a rebuild that draws the same pixels presents nothing");
-
-    let resized = wgpu::SurfaceConfiguration { width: 402, ..config.clone() };
-    assert!(!p.same(&rt, &resized), "a resized surface draws again");
-    rt.text.atlas.dirty = Some((0, 1));
-    assert!(!p.same(&rt, &config), "a glyph upload draws again");
-    rt.text.atlas.dirty = None;
-
-    rt.update(|n, _| *n = 8);
-    rt.settle_all();
-    rt.frame(0.0);
-    assert!(!p.same(&rt, &config), "a change on screen draws again");
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn launch_frames_hold_two_drawables_until_the_window_rests() {
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        width: 1960,
-        height: 1520,
-        present_mode: wgpu::PresentMode::AutoVsync,
-        desired_maximum_frame_latency: 2,
-        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-        view_formats: vec![],
-        color_space: Default::default(),
-    };
-    let t0 = Instant::now();
-    let mut launch = LaunchDrawables::cap(&mut config);
-    assert_eq!(config.desired_maximum_frame_latency, 1, "Metal makes latency + 1 drawables");
-    assert_eq!(launch.settle(false, t0), None);
-    assert_eq!(launch.settle(false, t0 + Duration::from_millis(500)), None, "frames back to back stay capped");
-    assert_eq!(launch.settle(true, t0 + Duration::from_millis(600)), Some(2), "resting restores the configured latency");
-    assert_eq!(launch.settle(true, t0 + Duration::from_millis(700)), None, "once");
-    assert_eq!(launch.settle(false, t0 + Duration::from_secs(5)), None);
-
-    // A window that never rests gets its third drawable after its first second on screen.
-    config.desired_maximum_frame_latency = 2;
-    let mut launch = LaunchDrawables::cap(&mut config);
-    let shown = t0 + Duration::from_secs(3);
-    assert_eq!(launch.settle(false, shown), None, "the second counts from the first frame on screen");
-    assert_eq!(launch.settle(false, shown + Duration::from_millis(999)), None);
-    assert_eq!(launch.settle(false, shown + LaunchDrawables::LAUNCH), Some(2));
-
-    // Nothing to restore when the configuration already asks for two.
-    config.desired_maximum_frame_latency = 1;
-    let mut launch = LaunchDrawables::cap(&mut config);
-    assert_eq!(config.desired_maximum_frame_latency, 1);
-    assert_eq!(launch.settle(true, t0), None);
 }
 
 /// Follows a blend switch (`Tx::set_srgb_blend`) on a configured surface: reconfigures it for
