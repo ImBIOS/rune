@@ -877,6 +877,7 @@ pub struct TextSpec {
     pub live: Option<crate::LiveText>,
     pub(crate) links: Vec<Link>,
     pub(crate) on_link: Option<LinkFn>,
+    pub(crate) on_link_secondary: Option<LinkSecondaryFn>,
     /// Measured as its slice at this byte of the run (see [`El::advance_in`]).
     pub advance_in: Option<(crate::text::Run, usize)>,
     /// See [`El::text_case`]; applied when the element is laid out.
@@ -1071,6 +1072,12 @@ impl std::fmt::Debug for LinkFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("LinkFn")
     }
+}
+/// [`El::on_link_secondary`]'s handler.
+#[derive(Clone)]
+pub(crate) struct LinkSecondaryFn(pub Rc<dyn Fn(crate::states::States<'_>, &str, PointerPress, &mut Tx)>);
+impl std::fmt::Debug for LinkSecondaryFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("LinkSecondaryFn") }
 }
 
 pub use rune_motion::Cycle;
@@ -1523,6 +1530,7 @@ pub fn text(content: impl Into<String>) -> El {
         live: None,
         links: Vec::new(),
         on_link: None,
+        on_link_secondary: None,
         advance_in: None,
         case: None,
         source: None,
@@ -3228,6 +3236,16 @@ impl El {
     pub fn on_link<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         if let Some(t) = &mut self.text {
             t.on_link = Some(LinkFn(Rc::new(move |s, id, tx| f(downcast::<S>(s), id, tx))));
+        }
+        self
+    }
+    /// Called with a [`Link`]'s id and the point (window points) when a secondary press
+    /// (right-click, macOS control-click) lands on its glyphs: a menu for that link. It takes
+    /// the press, so ancestors' [`El::on_secondary_press`] and the text's Copy menu don't see
+    /// it; elsewhere in the text they still do.
+    pub fn on_link_secondary<S: 'static>(mut self, f: impl Fn(&mut S, &str, PointerPress, &mut Tx) + 'static) -> Self {
+        if let Some(t) = &mut self.text {
+            t.on_link_secondary = Some(LinkSecondaryFn(Rc::new(move |s, id, p, tx| f(downcast::<S>(s), id, p, tx))));
         }
         self
     }

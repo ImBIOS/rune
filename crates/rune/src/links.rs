@@ -229,6 +229,23 @@ impl<S: 'static> Runtime<S> {
         true
     }
 
+    /// Node `i`'s link under (x, y), if its text takes secondary presses on links.
+    pub(super) fn secondary_link_at(&self, i: usize, x: f32, y: f32) -> Option<usize> {
+        self.nodes[i].text.as_ref()?.on_link_secondary.as_ref()?;
+        self.link_at(i, x, y)
+    }
+
+    /// Runs the `on_link_secondary` handler of node `path` for link `k`.
+    pub(super) fn secondary_press_link(&mut self, path: &str, k: usize, point: PointerEvent, tx: &mut Tx) -> bool {
+        let Some((f, id)) = self.node(path).and_then(|n| {
+            let t = n.text.as_ref()?;
+            Some((t.on_link_secondary.clone()?, t.links.get(k)?.id.clone()))
+        }) else { return false };
+        self.events.push(format!("link secondary {path} {id}"));
+        (f.0)(states!(self), &id, point.window(), tx);
+        true
+    }
+
     /// Centre of the first drawn line box of the link whose id is `id`, in points.
     pub(super) fn find_link(&self, id: &str) -> Option<(f32, f32)> {
         (0..self.nodes.len()).filter(|&i| !self.subtree_exiting(i)).find_map(|i| {

@@ -1150,6 +1150,7 @@ pub struct Markdown {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    on_link_secondary: Option<LinkWire>,
     link_look: Option<LinkLook>,
     on_task: Option<TaskWire>,
     tasks_read_only: bool,
@@ -1162,7 +1163,7 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, block_keys: Vec::new(), highlights: Vec::new(), autolink: true, reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
+        Markdown { src: src.into(), style: None, block_keys: Vec::new(), highlights: Vec::new(), autolink: true, reveal: 0.0, streaming: false, on_link: None, on_link_secondary: None, link_look: None, link_ring: None,
             on_task: None, tasks_read_only: false, selectable: false, copy_source: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
     /// Highlight UTF-8 byte ranges of the Markdown source string (see [`find`]).
@@ -1325,7 +1326,7 @@ impl Markdown {
             starts.iter().map(|at| self.block_keys.iter().find(|(offset, _)| offset == at)
                 .map_or_else(String::new, |(_, key)| key.clone())).collect::<Vec<_>>()
         };
-        let r = Renderer { s: style.clone(), highlights: self.highlights, reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, link_ring: self.link_ring,
+        let r = Renderer { s: style.clone(), highlights: self.highlights, reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, on_link_secondary: self.on_link_secondary, link_look: self.link_look, link_ring: self.link_ring,
             on_task: self.on_task, tasks_read_only: self.tasks_read_only, selectable: self.selectable, scroll_wide: self.scroll_wide,
             highlighter: self.highlighter, sources, next_source: Cell::new(0), tasks, next_task: Cell::new(0),
             current_block_key: RefCell::new("b0".into()) };
@@ -1343,6 +1344,7 @@ struct Renderer {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    on_link_secondary: Option<LinkWire>,
     link_look: Option<LinkLook>,
     on_task: Option<TaskWire>,
     tasks_read_only: bool,
@@ -1823,7 +1825,7 @@ mod tests {
             }
         }
         let (blocks, sources, tasks, _, _) = doc_cached(src);
-        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None, on_task: None,
+        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, on_link_secondary: None, link_look: None, link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter, sources: sources.clone(),
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let mut found = Vec::new();
@@ -2075,7 +2077,7 @@ mod tests {
         });
         let (blocks, sources, tasks, _, _) = doc_cached("[**bold** *em* `code` plain](session:1)");
         let Block::Para(inl) = &blocks[0] else { panic!() };
-        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), link_ring: None, on_task: None,
+        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, on_link_secondary: None, link_look: Some(look), link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin(), sources,
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let spans = r.spans(inl, style.body.size);

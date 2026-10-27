@@ -1,5 +1,6 @@
 //! Links in Markdown: their handlers, looks and rings, and wiring them onto the text.
 use super::*;
+use rune::PointerPress;
 
 pub(super) type LinkWire = Rc<dyn Fn(El) -> El>;
 pub(super) type LinkLook = Rc<dyn Fn(&str) -> Option<(Span, LinkPaint)>>;
@@ -21,6 +22,18 @@ impl Markdown {
         self.on_link = Some(Rc::new(move |e: El| {
             let f = f.clone();
             e.on_link(move |s: &mut S, url, tx| f(s, url, tx))
+        }));
+        self
+    }
+    /// Called with a link's destination and the point (window points) when a right-click (or
+    /// macOS control-click) lands on it: a menu for that link (Open, Copy Link). It takes the
+    /// press from the menus of the elements around the Markdown, which still get right-clicks
+    /// elsewhere in the text. Links show a hand and are Tab stops with this alone, too.
+    pub fn on_link_secondary<S: 'static>(mut self, f: impl Fn(&mut S, &str, PointerPress, &mut Tx) + 'static) -> Self {
+        let f = Rc::new(f);
+        self.on_link_secondary = Some(Rc::new(move |e: El| {
+            let f = f.clone();
+            e.on_link_secondary(move |s: &mut S, url, p, tx| f(s, url, p, tx))
         }));
         self
     }
@@ -65,10 +78,11 @@ impl Renderer {
                 }
             }
         }
-        let Some(on_link) = self.on_link.as_ref().filter(|_| !inl.links.is_empty()) else { return e };
+        if inl.links.is_empty() || (self.on_link.is_none() && self.on_link_secondary.is_none()) { return e; }
         let default = LinkPaint::new().underline(self.s.accent);
         let hover = |url: &str| self.link_look.as_ref().and_then(|f| f(url)).map_or(default, |l| l.1);
         let e = inl.links.iter().fold(e, |e, (a, b, url)| e.link(Link::new(*a..*b, url.clone()).hover(hover(url))));
-        on_link(e)
+        let e = match &self.on_link { Some(f) => f(e), None => e };
+        match &self.on_link_secondary { Some(f) => f(e), None => e }
     }
 }

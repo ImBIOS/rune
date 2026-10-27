@@ -493,6 +493,8 @@ enum Action {
     Press(String, crate::PointerButton),
     DoublePress(String),
     Link(String, usize),
+    /// `El::on_link_secondary`: the text, its link and the press.
+    LinkSecondary(String, usize, PointerEvent),
     SecondaryPress(String, PointerEvent),
     Drag(String, Drag, crate::PointerButton),
     DragStart(String),
@@ -2757,6 +2759,7 @@ impl<S: 'static> Runtime<S> {
                 true
             }
             Action::Link(path, k) => self.press_link(&path, k, &mut one),
+            Action::LinkSecondary(path, k, point) => self.secondary_press_link(&path, k, point, &mut one),
             Action::SecondaryPress(path, point) => {
                 let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
                 let Some(f) = n.on_secondary_press.clone() else { return false };
@@ -7977,6 +7980,7 @@ fn live_only_handler(action: &Action) -> Option<&'static str> {
         Action::Press(..) => "on_press",
         Action::DoublePress(_) => "on_double_press",
         Action::Link(..) => "on_link",
+        Action::LinkSecondary(..) => "on_link_secondary",
         Action::SecondaryPress(..) => "on_secondary_press",
         Action::Drag(..) => "on_drag",
         Action::DragStart(_) => "on_drag_start",
@@ -8001,7 +8005,7 @@ pub(crate) fn fold_live(live: &mut Option<bool>, took: bool, one: &Tx) {
 fn action_path(action: &Action) -> Option<&str> {
     match action {
         Action::PointerMove(path, _) | Action::DrawnLayout(path, ..) | Action::Hover(path) | Action::HoverChange(path, _) | Action::SelectionChange(path, _) | Action::Press(path, _) | Action::DoublePress(path)
-        | Action::Link(path, _) | Action::SecondaryPress(path, _) | Action::Drag(path, ..) | Action::DragStart(path)
+        | Action::Link(path, _) | Action::LinkSecondary(path, ..) | Action::SecondaryPress(path, _) | Action::Drag(path, ..) | Action::DragStart(path)
         | Action::DragEnd(path, _) => Some(path),
         Action::Wheel(_, chain, _) | Action::Gesture(chain, _) => chain.first().map(String::as_str),
         _ => None,
