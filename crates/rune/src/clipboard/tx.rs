@@ -20,12 +20,16 @@ impl Tx {
         self.copy = Some(crate::ClipboardWrite::new(crate::ClipboardContent::new(text)));
     }
 
-    /// Copy formatted text: plain text for every app, plus HTML and RTF for apps that paste
-    /// formatting (Mail, Notes, Pages, Google Docs). Windows and Linux write the plain text and
-    /// HTML, and the web plain text and HTML, without RTF.
+    /// Copy several forms at once: plain text for every app, HTML and RTF for apps that paste
+    /// formatting (Mail, Notes, Pages, Google Docs), an image, and files for a file manager.
+    /// macOS writes every form. Windows and Linux write one: the files if there are any, else
+    /// the image, else the HTML beside the text, else the text. The web writes text, HTML and
+    /// the image. Forms a platform can't hold are skipped silently.
     ///
     /// ```ignore
     /// tx.copy_rich(ClipboardContent::new("Ship it").with_html("<b>Ship</b> it"));
+    /// tx.copy_rich(ClipboardContent::default().with_image(image));
+    /// tx.copy_rich(ClipboardContent::default().with_files([path]));
     /// ```
     pub fn copy_rich(&mut self, content: crate::ClipboardContent) {
         self.copy = Some(crate::ClipboardWrite::new(content));

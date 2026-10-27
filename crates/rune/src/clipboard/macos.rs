@@ -2,16 +2,20 @@
 //! change count moves once; RTF from apps that offer nothing richer (TextEdit, Notes, Pages)
 //! is converted to HTML. Runs on the clipboard worker: AppKit's RTF reader and HTML writer
 //! don't need the main thread (its HTML *reader* does, and isn't used). A TIFF image (what
-//! most Mac apps copy) is converted to PNG there too, by `NSBitmapImageRep`.
+//! most Mac apps copy) is converted to PNG there too, by `NSBitmapImageRep`, and a copied PNG
+//! to TIFF.
+use std::path::PathBuf;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::ClassType;
 use objc2_app_kit::{
     NSAttributedStringDocumentFormats, NSBitmapImageFileType, NSBitmapImageRep, NSCharacterEncodingDocumentAttribute,
-    NSDocumentTypeDocumentAttribute, NSHTMLTextDocumentType, NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypePNG,
-    NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSDocumentTypeDocumentAttribute, NSHTMLTextDocumentType, NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
-use objc2_foundation::{NSAttributedString, NSCopying, NSData, NSDictionary, NSNumber, NSRange, NSString, NSUTF8StringEncoding};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSCopying, NSData, NSDictionary, NSNumber, NSRange, NSString, NSURL, NSUTF8StringEncoding,
+};
 use zeroize::Zeroizing;
 use super::{ClipboardContent, ClipboardImage, MAX_IMAGE_BYTES};
 use super::html::MAX_RICH_BYTES;
@@ -19,41 +23,72 @@ use super::html::MAX_RICH_BYTES;
 /// Refuse to hand AppKit's RTF parser multi-megabyte blobs (e.g. embedded images).
 const MAX_RTF_CONVERT_BYTES: usize = 1024 * 1024;
 
-/// Replaces the pasteboard's contents with plain text and whichever of HTML and RTF `content`
-/// carries.
+/// Replaces the pasteboard's contents with every form `content` carries. The first pasteboard
+/// item holds the text (unless it's empty and another form isn't), HTML, RTF and the image as
+/// PNG and TIFF (for apps that take only TIFF); each file is an item of its own with its file
+/// URL, as Finder writes a copy of several files, so a file manager pastes them all.
 pub(super) fn write(pb: &NSPasteboard, content: &ClipboardContent) -> Result<(), String> {
     autoreleasepool(|_| unsafe {
-        pb.clearContents();
         let refused = |form: &str| format!("the pasteboard refused the {form}");
-        if !pb.setString_forType(&NSString::from_str(content.text()), NSPasteboardTypeString) { return Err(refused("text")); }
-        if let Some(html) = content.html() && !pb.setString_forType(&NSString::from_str(&declare_utf8(html)), NSPasteboardTypeHTML) {
+        let items: Vec<Retained<NSPasteboardItem>> = (0..content.files().len().max(1)).map(|_| NSPasteboardItem::new()).collect();
+        let first = &items[0];
+        let text = content.text();
+        if (!text.is_empty() || !content.is_rich()) && !first.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) {
+            return Err(refused("text"));
+        }
+        if let Some(html) = content.html() && !first.setString_forType(&NSString::from_str(&declare_utf8(html)), NSPasteboardTypeHTML) {
             return Err(refused("HTML"));
         }
-        if let Some(rtf) = content.rtf() && !pb.setData_forType(Some(&NSData::with_bytes(rtf.as_bytes())), NSPasteboardTypeRTF) {
+        if let Some(rtf) = content.rtf() && !first.setData_forType(&NSData::with_bytes(rtf.as_bytes()), NSPasteboardTypeRTF) {
             return Err(refused("RTF"));
         }
+        if let Some(image) = content.image() {
+            let tiff = png_to_tiff(image.png()).ok_or_else(|| "the image didn't convert to TIFF".to_string())?;
+            if !first.setData_forType(&NSData::with_bytes(image.png()), NSPasteboardTypePNG) || !first.setData_forType(&tiff, NSPasteboardTypeTIFF) {
+                return Err(refused("image"));
+            }
+        }
+        for (item, path) in items.iter().zip(content.files()) {
+            let url = path.to_str().and_then(|p| NSURL::fileURLWithPath(&NSString::from_str(p)).absoluteString());
+            if !url.is_some_and(|url| item.setString_forType(&url, NSPasteboardTypeFileURL)) { return Err(refused("file")); }
+        }
+        pb.clearContents();
+        let objects = NSArray::from_vec(items.into_iter().map(ProtocolObject::from_retained).collect());
+        if !pb.writeObjects(&objects) { return Err(refused("content")); }
         Ok(())
     })
 }
 
 /// Plain text, HTML and RTF, with HTML made from the RTF when the pasteboard has no HTML, and
-/// with `image`, the pasteboard's PNG, or its TIFF as PNG.
-pub(super) fn read(pb: &NSPasteboard, image: bool) -> Option<ClipboardContent> {
+/// with `all`, the pasteboard's PNG (or its TIFF as PNG) and its file URLs too.
+pub(super) fn read(pb: &NSPasteboard, all: bool) -> Option<ClipboardContent> {
     autoreleasepool(|_| unsafe {
         let text = pb.stringForType(NSPasteboardTypeString).map(|s| Zeroizing::new(s.to_string()));
         let html = pb.stringForType(NSPasteboardTypeHTML).map(|s| s.to_string()).filter(|h| !h.is_empty() && h.len() <= MAX_RICH_BYTES);
         let rtf = pb.dataForType(NSPasteboardTypeRTF)
             .filter(|d| !d.is_empty() && d.len() <= MAX_RICH_BYTES)
             .map(|d| Zeroizing::new(d.bytes().to_vec()));
-        let image = if image { read_image(pb) } else { None };
-        if text.is_none() && html.is_none() && rtf.is_none() && image.is_none() { return None; }
+        let image = if all { read_image(pb) } else { None };
+        let files = if all { read_files(pb) } else { Vec::new() };
+        if text.is_none() && html.is_none() && rtf.is_none() && image.is_none() && files.is_empty() { return None; }
         let html = html.or_else(|| rtf.as_deref().and_then(|rtf| rtf_to_html(rtf)));
-        let mut content = ClipboardContent::from(text.unwrap_or_default());
+        let mut content = ClipboardContent::from(text.unwrap_or_default()).with_files(files);
         if let Some(html) = html { content = content.with_html(html); }
         if let Some(rtf) = rtf { content = content.with_rtf(String::from_utf8_lossy(&rtf)); }
         if let Some(image) = image { content = content.with_image(image); }
         Some(content)
     })
+}
+
+/// The path of each pasteboard item's file URL, in order.
+fn read_files(pb: &NSPasteboard) -> Vec<PathBuf> {
+    let Some(items) = (unsafe { pb.pasteboardItems() }) else { return Vec::new() };
+    items.iter().filter_map(|item| unsafe { item.stringForType(NSPasteboardTypeFileURL) }.and_then(|url| crate::macos_drop::file_path(&url))).collect()
+}
+
+/// TIFF for PNG bytes, through `NSBitmapImageRep`.
+fn png_to_tiff(png: &[u8]) -> Option<Retained<NSData>> {
+    unsafe { NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png))?.TIFFRepresentation() }
 }
 
 const MAX_TIFF_BYTES: usize = 8 * MAX_IMAGE_BYTES;
@@ -217,14 +252,42 @@ mod tests {
         let _: () = unsafe { objc2::msg_send![&pb, releaseGlobally] };
     }
 
+    /// An image Rune copies goes on as PNG and TIFF with no empty text beside it; files go on
+    /// one item each, with every other form on the first.
+    #[test]
+    fn images_and_files_are_written_for_other_apps() {
+        let pb: Option<Retained<NSPasteboard>> = unsafe { objc2::msg_send_id![NSPasteboard::class(), pasteboardWithUniqueName] };
+        let Some(pb) = pb else { return eprintln!("no pasteboard server; skipped") };
+        let before = unsafe { pb.changeCount() };
+        let image = ClipboardImage::from_png(png_2x3()).unwrap();
+        write(&pb, &ClipboardContent::default().with_image(image.clone())).unwrap();
+        assert_eq!(unsafe { pb.changeCount() }, before + 1);
+        unsafe {
+            assert_eq!(pb.dataForType(NSPasteboardTypePNG).map(|d| d.bytes().to_vec()), Some(png_2x3()));
+            assert_eq!(pb.dataForType(NSPasteboardTypeTIFF).and_then(|d| tiff_to_png(d.bytes())).map(|i| i.size()), Some((2, 3)));
+            assert!(pb.stringForType(NSPasteboardTypeString).is_none(), "an empty text isn't written beside the image");
+        }
+        assert_eq!(read(&pb, true).unwrap(), ClipboardContent::default().with_image(image), "the image pastes back as is");
+
+        let files = [PathBuf::from("/fixtures/a.txt"), PathBuf::from("/fixtures/b c.png")];
+        write(&pb, &ClipboardContent::new("a.txt b c.png").with_html("<b>files</b>").with_files(files.clone())).unwrap();
+        let items = unsafe { pb.pasteboardItems() }.unwrap();
+        assert_eq!(items.count(), 2, "one item per file");
+        let url = unsafe { items.objectAtIndex(1).stringForType(NSPasteboardTypeFileURL) }.unwrap().to_string();
+        assert_eq!(url, "file:///fixtures/b%20c.png");
+        assert!(unsafe { items.objectAtIndex(1).stringForType(NSPasteboardTypeString) }.is_none(), "other forms ride on the first item");
+        let back = read(&pb, true).unwrap();
+        assert_eq!((back.text(), back.files()), ("a.txt b c.png", &files[..]));
+        assert!(read(&pb, false).unwrap().files().is_empty(), "files are read only when asked for");
+        let _: () = unsafe { objc2::msg_send![&pb, releaseGlobally] };
+    }
+
     fn png_2x3() -> Vec<u8> {
         let rgba: Vec<u8> = (0..6u8).flat_map(|i| [i * 40, 255 - i * 40, 128, 255]).collect();
         crate::drag_out::encode_png(2, 3, &rgba).unwrap()
     }
 
-    fn tiff_of(png: &[u8]) -> Vec<u8> {
-        unsafe { NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png)).unwrap().TIFFRepresentation().unwrap().bytes().to_vec() }
-    }
+    fn tiff_of(png: &[u8]) -> Vec<u8> { png_to_tiff(png).unwrap().bytes().to_vec() }
 
     #[test]
     fn tiff_becomes_png_off_the_main_thread() {

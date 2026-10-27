@@ -304,8 +304,10 @@ impl Client {
                     (self.wake)();
                 }
             } else {
-                // The browser's Clipboard API takes plain text and HTML; RTF stays behind.
-                let promise = crate::web::platform::write_clipboard(&copy, copy.content().html().unwrap_or(""));
+                // The browser's Clipboard API takes plain text, HTML and PNG; RTF and files stay behind.
+                let content = copy.content();
+                let png = content.image().map_or(&[][..], ClipboardImage::png);
+                let promise = crate::web::platform::write_clipboard(content.text(), content.html().unwrap_or(""), png);
                 wasm_bindgen_futures::spawn_local(async move {
                     if wasm_bindgen_futures::JsFuture::from(promise).await.is_err() {
                         web_sys::console::warn_1(&"Clipboard write denied by the browser.".into());
@@ -408,8 +410,8 @@ impl Backend for Board {
     fn text(&mut self) -> Option<Zeroizing<String>> {
         self.content.as_ref().filter(|c| c.has_plain()).map(|c| c.text.clone())
     }
-    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
-        self.content.clone().map(|c| if image { c } else { c.without_image() })
+    fn content(&mut self, all: bool) -> Option<ClipboardContent> {
+        self.content.clone().map(|c| if all { c } else { c.text_forms() })
     }
     fn revision(&self) -> Option<u64> { Some(self.revision) }
     fn clear(&mut self) { self.content = None; self.revision += 1; }
@@ -458,9 +460,9 @@ pub(crate) fn shutdown() {
 trait Backend {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String>;
     fn text(&mut self) -> Option<Zeroizing<String>>;
-    /// Every form a paste can use, unsanitised, and the image only when asked: decoding one
-    /// can take a while.
-    fn content(&mut self, _image: bool) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
+    /// Every form a paste can use, unsanitised, and the image and files only when asked (`all`):
+    /// decoding an image can take a while.
+    fn content(&mut self, _all: bool) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
     fn revision(&self) -> Option<u64>;
     fn clear(&mut self);
 }
@@ -469,25 +471,27 @@ impl Backend for arboard::Clipboard {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy) }
     fn text(&mut self) -> Option<Zeroizing<String>> { self.get_text().ok().map(Zeroizing::new) }
     #[cfg(target_os = "macos")]
-    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
-        macos::read(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() }, image)
+    fn content(&mut self, all: bool) -> Option<ClipboardContent> {
+        macos::read(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() }, all)
     }
-    /// Text, HTML and an image; RTF isn't read here. Windows and Linux images come through
-    /// arboard as pixels (Windows `PNG` or `CF_DIBV5`, Linux `image/png`), encoded as PNG again.
+    /// Text, HTML, and with `all` an image and files; RTF isn't read here. Windows and Linux
+    /// images come through arboard as pixels (Windows `PNG` or `CF_DIBV5`, Linux `image/png`),
+    /// encoded as PNG again.
     #[cfg(not(target_os = "macos"))]
-    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
+    fn content(&mut self, all: bool) -> Option<ClipboardContent> {
         let text = self.text();
         #[cfg(target_os = "windows")]
         let html = windows_read_html().or_else(|| self.get().html().ok()).filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
         #[cfg(not(target_os = "windows"))]
         let html = self.get().html().ok().filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
         #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")))))]
-        let image = image.then(|| self.get_image().ok()).flatten()
+        let image = all.then(|| self.get_image().ok()).flatten()
             .and_then(|i| u32::try_from(i.width).ok().zip(u32::try_from(i.height).ok()).and_then(|(w, h)| ClipboardImage::from_rgba(w, h, &i.bytes)));
         #[cfg(not(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android"))))))]
-        let image: Option<ClipboardImage> = { let _ = image; None };
-        if text.is_none() && html.is_none() && image.is_none() { return None; }
-        let mut content = ClipboardContent::from(text.unwrap_or_default());
+        let image: Option<ClipboardImage> = None;
+        let files = if all { self.get().file_list().unwrap_or_default() } else { Vec::new() };
+        if text.is_none() && html.is_none() && image.is_none() && files.is_empty() { return None; }
+        let mut content = ClipboardContent::from(text.unwrap_or_default()).with_files(files);
         if let Some(html) = html { content = content.with_html(html); }
         if let Some(image) = image { content = content.with_image(image); }
         Some(content)
@@ -539,11 +543,27 @@ fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), Strin
     if copy.clear_after.is_none() && content.is_rich() {
         #[cfg(target_os = "macos")]
         { return macos::write(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() }, content); }
-        // Windows writes CF_HTML and Linux `text/html` beside the text; neither writes RTF.
-        #[allow(unreachable_code)]
-        if let Some(html) = content.html() { return cb.set().html(html, Some(content.text())).map_err(|e| e.to_string()); }
+        #[cfg(not(target_os = "macos"))]
+        return write_one_form(cb, content);
     }
     write_text(cb, copy).map_err(|e| e.to_string())
+}
+
+/// Windows and Linux hold one of Rune's forms per write: the files, else the image, else HTML
+/// beside the text (CF_HTML, `text/html`), else the text. RTF isn't written.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+fn write_one_form(cb: &mut arboard::Clipboard, content: &ClipboardContent) -> Result<(), String> {
+    let error = |e: arboard::Error| e.to_string();
+    if !content.files().is_empty() { return cb.set().file_list(content.files()).map_err(error); }
+    #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")))))]
+    if let Some(rgba) = content.image().and_then(ClipboardImage::to_rgba) {
+        let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+        return cb.set_image(arboard::ImageData { width, height, bytes: rgba.into_raw().into() }).map_err(error);
+    }
+    match content.html() {
+        Some(html) => cb.set().html(html, Some(content.text())).map_err(error),
+        None => cb.set_text(content.text()).map_err(error),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,12 +1,14 @@
-// Plain text, with HTML beside it when there is some (`html` is '' otherwise).
-export async function writeClipboard(text, html) {
+// Plain text, with HTML and a PNG image (a Uint8Array) beside it when there are some (`html`
+// is '' and `png` empty otherwise). Empty text isn't written beside another form.
+export async function writeClipboard(text, html, png) {
     const clipboard = navigator.clipboard;
     if (!clipboard) throw new Error('Clipboard requires HTTPS.');
-    if (!html || typeof ClipboardItem === 'undefined') return clipboard.writeText(text);
-    return clipboard.write([new ClipboardItem({
-        'text/plain': new Blob([text], { type: 'text/plain' }),
-        'text/html': new Blob([html], { type: 'text/html' }),
-    })]);
+    if ((!html && !png.length) || typeof ClipboardItem === 'undefined') return clipboard.writeText(text);
+    const forms = {};
+    if (text) forms['text/plain'] = new Blob([text], { type: 'text/plain' });
+    if (html) forms['text/html'] = new Blob([html], { type: 'text/html' });
+    if (png.length) forms['image/png'] = new Blob([png], { type: 'image/png' });
+    return clipboard.write([new ClipboardItem(forms)]);
 }
 
 // `{ text, html, png }`, each undefined when the clipboard lacks it; `html` only when `rich`,

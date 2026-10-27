@@ -161,7 +161,7 @@ unsafe fn items(pb: &NSPasteboard) -> Vec<(Retained<NSPasteboardItem>, Item)> {
 }
 
 /// The path of a `file://` URL, resolving the file-reference form (`file:///.file/id=…`).
-fn file_path(url: &NSString) -> Option<PathBuf> {
+pub(crate) fn file_path(url: &NSString) -> Option<PathBuf> {
     // SAFETY: Foundation URL calls with live strings.
     unsafe {
         let url = NSURL::URLWithString(url)?;

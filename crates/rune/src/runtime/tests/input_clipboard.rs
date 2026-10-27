@@ -282,6 +282,48 @@ fn pasted_images_reach_hooks_only() {
 }
 
 #[test]
+fn copied_images_and_files_round_trip_and_reach_only_hooks() {
+    use std::path::PathBuf;
+    use crate::{ClipboardContent, ClipboardImage};
+    #[derive(Default)]
+    struct State { field: crate::TextEdit, rich: crate::TextEdit, reads: Vec<ClipboardContent> }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let style = crate::TextStyle::new(16.0, 400.0);
+        col().size(200.0, 100.0)
+            .child(crate::text_input(&s.field, style).key("field").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.field))
+            .child(crate::text_input(&s.rich, style).key("rich").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.rich))
+    }
+    let rgba: Vec<u8> = (0..4u8).flat_map(|i| [i * 60, 0, 0, 255]).collect();
+    let image = ClipboardImage::from_rgba(2, 2, &rgba).unwrap();
+    let files = [PathBuf::from("/fixtures/a.txt"), PathBuf::from("/fixtures/b c.png")];
+    let only_files = ClipboardContent::default().with_files(files.clone());
+    assert!(only_files.is_rich() && !only_files.is_empty() && !only_files.has_plain());
+    assert_eq!(only_files.files(), &files[..]);
+    assert_ne!(only_files, ClipboardContent::default(), "files take part in equality");
+    assert!(!format!("{only_files:?}").contains("fixtures"));
+
+    let m = crate::clipboard::memory();
+    let mut rt = Runtime::new(State { rich: crate::TextEdit::new("").rich(), ..State::default() }, view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.use_clipboard(&m);
+    rt.frame(0.0);
+    let copied = ClipboardContent::new("two files").with_image(image.clone()).with_files(files.clone());
+    rt.update(|_, tx| tx.copy_rich(copied.clone()));
+    assert_eq!(m.content().as_ref(), Some(&copied), "the memory clipboard keeps every form");
+    rt.update(|_, tx| tx.read_clipboard(|s: &mut State, content, _| s.reads.push(content.clone())));
+    rt.frame(0.0);
+    assert_eq!(rt.state.reads.pop().as_ref(), Some(&copied), "a read gets the image and files back");
+
+    rt.update(|_, tx| tx.copy_rich(only_files.clone()));
+    for which in [(|s: &mut State| &mut s.field) as fn(&mut State) -> &mut crate::TextEdit, |s| &mut s.rich] {
+        rt.update(move |s, _| { s.field.focused = false; s.rich.focused = false; which(s).focused = true; });
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.request_paste());
+        rt.frame(0.0);
+    }
+    assert_eq!((rt.state.field.text.as_str(), rt.state.rich.text.as_str()), ("", ""), "files alone paste nothing into a field without a hook");
+}
+
+#[test]
 fn read_clipboard_answers_once_even_when_empty_and_pastes_nowhere() {
     use crate::ClipboardContent;
     #[derive(Default)]
