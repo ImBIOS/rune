@@ -1,0 +1,114 @@
+use super::*;
+
+pub(super) fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inert: bool, inputs: &mut HashMap<String, Box<InputSpec>>) {
+    // Most offscreen rows hold no focused field; find that out before building any paths.
+    if !crate::memo::has_focused_input(el) {
+        return;
+    }
+    let inert = inert || el.inert;
+    let input = el.input.as_ref().filter(|i| i.edit.focused && i.access.is_some());
+    // A memo's shared children are skipped whole when none is a focused field.
+    let skip = el.memo_children.as_ref().filter(|m| !m.focused_input).map_or(0, |m| m.children.len());
+    if input.is_none() && el.children.is_empty() && skip == el.memo_children.as_ref().map_or(0, |m| m.children.len()) {
+        return;
+    }
+    let segment = el.key.clone().unwrap_or_else(|| format!("#{index}"));
+    let path = format!("{parent}/{segment}");
+    if let Some(input) = input {
+        let mut input = input.clone();
+        if inert { input.edit.focused = false; }
+        inputs.insert(path.clone(), input);
+    }
+    for (i, child) in el.all_children().enumerate().skip(skip) {
+        collect_virtual_inputs(child, &path, i, inert, inputs);
+    }
+}
+
+impl<S: 'static> Measurement<'_, S> {
+    pub(super) fn node_id(&mut self, path: &str) -> NodeId {
+        if let Some(&id) = self.path_ids.get(path) { return id; }
+        let id = NodeId(*self.next_id);
+        *self.next_id += 1;
+        self.path_ids.insert(path.to_owned(), id);
+        id
+    }
+
+    /// Finishes all row measurements before scene/growth mutation. Newly measured estimates
+    /// above the viewport adjust the scroll offset by exactly the same amount.
+    pub(super) fn measure_virtuals(&mut self, nodes: &[Node], settle: bool) -> bool {
+        let mut retry = false;
+        for (path, v) in self.virtuals.iter_mut() {
+            let Some((ci, _)) = nodes.iter().enumerate().find(|(_, n)| n.path == *path) else { continue };
+            for n in nodes.iter().filter(|n| n.parent == Some(ci)) {
+                v.set_height(n.key.as_deref().unwrap(), n.local.h);
+            }
+            let Some(scroll) = nodes.iter().find(|n| n.path == v.scroll_path) else { continue };
+            v.viewport = scroll.local.h;
+            let st = self.scrolls.get_mut(&scroll.id);
+            let sticky = scroll.scroll.unwrap().stick_bottom;
+            let pinned = (settle && sticky) || st.as_ref().map_or(sticky, |s| s.pinned);
+            let offset = if let Some(st) = st {
+                if !pinned { st.offset = (st.offset + f64::from(v.anchor_delta())).max(0.0); }
+                st.offset as f32
+            } else { 0.0 };
+            // Rows that shrank or went leave the offset past the end until scrolling clamps it;
+            // what shows then is the end.
+            let offset = offset.min(v.max_offset());
+            let end = v.row_end(v.range.end);
+            let mounted_height = (end - v.before).max(0.0);
+            // Never present a blank caused by an estimate. Expand and measure again first.
+            retry |= if pinned {
+                v.range.start > 0 && mounted_height < v.viewport
+            } else {
+                (v.range.start > 0 && offset < v.pad_top + v.before)
+                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + end)
+            };
+        }
+        retry
+    }
+
+    /// Checks the view's keys and builds the virtual windows, index-built rows included.
+    pub(super) fn build_tree(&mut self, mut root: El, tx: &Tx, force_all: bool) -> El {
+        // Two siblings with one key would share a layout node, which Taffy panics on. Rename the
+        // later ones so every build, debug or release, lays out; --tree still lists them.
+        let duplicates = crate::key_diagnostics::repair(&mut root);
+        match self.key_warnings.as_mut() {
+            Some(warnings) => *warnings = duplicates.into_iter().map(|d| d.message).collect(),
+            None => crate::key_diagnostics::warn_once(&duplicates),
+        }
+        // Index-built rows build here, so memos inside them share the view's cache. A window that
+        // fits its content lays its root out at its natural height, which nothing bounds.
+        let bound = if self.fit_height { f32::INFINITY } else { self.viewport.1 };
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound, false);
+        root
+    }
+}
+
+impl<S: 'static> Runtime<S> {
+    /// Records which row of each virtual list holds focus, by key, so the row is still built
+    /// after it scrolls out. Walks the node tree, since a key may itself contain `/`.
+    pub(super) fn track_focused_rows(&mut self) {
+        if self.virtuals.is_empty() { return; }
+        let focused = self.focused.as_deref().and_then(|f| self.nodes.iter().position(|n| n.path == f));
+        for (path, v) in self.virtuals.iter_mut() {
+            let Some(rest) = self.focused.as_deref().and_then(|f| f.strip_prefix(path.as_str())).and_then(|r| r.strip_prefix('/')) else {
+                v.focused_row = None;
+                continue;
+            };
+            if let Some(mut i) = focused {
+                while let Some(p) = self.nodes[i].parent {
+                    if self.nodes[p].path == *path {
+                        v.focused_row = self.nodes[i].key.clone();
+                        break;
+                    }
+                    i = p;
+                }
+            } else {
+                let matches = |k: &str| rest == k || rest.strip_prefix(k).is_some_and(|t| t.starts_with('/'));
+                if !v.focused_row.as_deref().is_some_and(matches) {
+                    v.focused_row = v.keys.iter().find(|k| matches(k)).cloned();
+                }
+            }
+        }
+    }
+}
