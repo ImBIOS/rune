@@ -795,8 +795,10 @@ def main():
             continue
         for f in sorted(live, key=lambda f: (f["kind"], -f["frames"])):
             print(f"  {f['kind']:<16} {short(f['element']):<60} @{f['at']:<14} {f['detail']}")
+    ran = {trace_name(r["trace"]) for r in reports}
     for r in rules:
-        if id(r) not in used:
+        # Only a rule for one trace this run recorded can go stale; a general rule may wait.
+        if id(r) not in used and r.get("trace") in ran:
             print(f"   unused allow rule: {json.dumps(r, ensure_ascii=False)}")
     if out:
         with open(out, "w") as f:

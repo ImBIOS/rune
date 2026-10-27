@@ -44,8 +44,8 @@ python3 scripts/motion-audit/analyze.py --script s.json trace.jsonl --allow allo
 ```
 
 `--allow` takes a JSON list of `{"trace", "kind" (or a list), "element" (a substring),
-"reason"}` rules for intended behaviour; every rule needs a reason, and unused rules are
-listed. `--fail` exits non-zero when a finding isn't allowed.
+"reason"}` rules for intended behaviour; every rule needs a reason, and a rule for a trace
+the run recorded that matched nothing is listed as unused. `--fail` exits non-zero when a finding isn't allowed.
 
 A motion that hides what it moves (a fade to 0, a collapse, a slide out) runs on for a few
 frames below what anyone can see, down to its settle threshold. Up to 250 ms of that tail,
