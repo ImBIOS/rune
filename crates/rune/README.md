@@ -2216,6 +2216,28 @@ App::new(spec).playground(
   playground. Snapshots, `--scene` renders and goldens leave it out; `--playground [story]`
   opens it at launch, headless too. Each `WindowSpec` can have its own.
 
+### Moving a story table onto it
+
+An app that keeps its own storybook (a `Story` trait with a group, a name, knobs and keys, a
+grouped list, and a knobs column) maps onto `App::playground` like this:
+
+| The app's storybook                         | `App::playground`                                                      |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| a story type implementing the trait         | `Story::new(name, init, view)`, or `Playground::page` for real state   |
+| `group()` and `name()`                      | one name, `"Group/Name"`; groups keep the order they first appear in   |
+| the story's keys (`Action`s)                | `Story::trigger(key, label, step)`; `'r'` runs after each replay       |
+| timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
+| the knobs column                            | `.side(view)`, with `rune_knobs::inline` and `rune_knobs::actions` in it |
+| open, leave, Esc, ⌘⇧D                       | built in: ⌘⇧D, Esc, Back, and `tx.open_playground()`                   |
+| a background poll                           | `Story::poll`                                                          |
+
+What it doesn't do yet, if the app's storybook relies on it: fold groups (with the fold state
+saved, headers as cursor stops, ←/→/↵ to fold and counts beside them), mark stories that have
+motion, flip a story's first choice knob with 1–9 or re-run its setup when a choice changes,
+link to a story by slug, list its keys in a shortcut sheet, give a story a scrolling page stage
+that bleeds to the edges, or move the keyboard into the knobs (`Knobs::panel_key`). Keep those
+in the app until they land here.
+
 ## Live Rust editing (desktop development)
 
 ```sh
