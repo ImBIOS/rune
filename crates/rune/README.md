@@ -2203,7 +2203,7 @@ triggers.
 
 ```rust
 App::new(spec).playground(
-    Playground::new()
+    Playground::<State>::new()                            // named, or the closures can't infer it
         .page("Lists/Live devices", devices)              // the real state, live
         .trigger("Lists/Many devices", 'a', "Add device", |s, _| s.devices.push("New"))
         .side("Lists/Many devices", device_count)         // the app's own controls, beside the stage

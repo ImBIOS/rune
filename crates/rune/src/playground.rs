@@ -41,13 +41,16 @@ use story::OwnStory;
 ///
 /// ```ignore
 /// App::new(spec).playground(
-///     Playground::new()
+///     Playground::<State>::new()
 ///         .page("Lists/Live devices", devices)
 ///         .trigger("Lists/Many devices", 'a', "Add device", |s, _| s.devices.push("New"))
 ///         .story(Story::new("Progress/Upload", Upload::new, upload).trigger('r', "Run", run))
 ///         .sizes(&[("Compact", (360.0, 240.0)), ("Wide", (900.0, 600.0))]),
 /// )
 /// ```
+///
+/// Name the app's state, as `Playground::<State>::new()`, when a closure comes before anything
+/// that does: `Playground::new().trigger(.., |s, _| ..)` can't infer it (E0282).
 ///
 /// Its stories are the window's `AppSpec::scenes`, then its pages and [`Story`]s, listed under
 /// their groups: a `"Group/Name"` name puts a story in a group, and the groups keep the order
