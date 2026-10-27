@@ -254,3 +254,77 @@ fn copying_a_card_table_takes_its_source_and_a_cell_as_drawn() {
     let lettuce = text(&rt, "Lettuce ×2").path;
     assert_eq!(copy(&mut rt, &clipboard, |tx| tx.select_text(lettuce, 0..7)), "Lettuce");
 }
+
+#[test]
+fn a_streaming_last_row_does_not_move_the_columns_of_a_scrolling_full_width_table() {
+    let src = |last: &str| format!("| Term | Meaning |\n|---|---|\n| cache | a short line |\n| tail | {last}");
+    let edges = |last: &str| {
+        let rt = run_with(Doc { src: src(last), style: card, width: 600.0, streaming: true, scroll_wide: true });
+        let frame = parent(&rt, "th").rect;
+        (0..2).map(|j| cell(&rt, "th", j).rect).chain([[frame[0], frame[1], frame[2], 0.0]]).collect::<Vec<_>>()
+    };
+    let short = edges("a row still");
+    assert_eq!(short, edges(&format!("a row still arriving {}", "x".repeat(400))));
+    assert_eq!(short[2][2], 600.0, "the frame still fills the viewport");
+}
+
+#[test]
+fn the_later_of_outline_and_frame_wins() {
+    let k = Kit::neutral(true);
+    let inset = |rt: &Runtime<Doc>| by_key(rt, "th").rect[0] - parent(rt, "th").rect[0];
+    fn outlined(k: &Kit) -> MarkdownStyle {
+        MarkdownStyle::from_kit(k).table_card(k).table_outline(Some(k.c.border_base))
+    }
+    fn tabled(k: &Kit) -> MarkdownStyle {
+        MarkdownStyle::from_kit(k).table_card(k).table(k.c.border_base, k.c.layer_02)
+    }
+    fn liked(k: &Kit) -> MarkdownStyle {
+        MarkdownStyle::from_kit(k).table_card(k).table_like(&rune_kit::TableStyle::from_kit(k))
+    }
+    assert_eq!(inset(&run(SRC, card, 600.0)), 2.0);
+    for style in [outlined as fn(&Kit) -> MarkdownStyle, tabled] {
+        let rt = run(SRC, style, 600.0);
+        assert_eq!(inset(&rt), 0.5, "the outline replaces the frame");
+        assert_ne!(parent(&rt, "th").fill, k.c.layer_01);
+    }
+    let rt = run(SRC, liked, 600.0);
+    assert!(!has(&rt, "tb"), "table_like drops the card");
+    assert_eq!(inset(&rt), 0.5);
+    let (th, c0) = (by_key(&rt, "th"), cell(&rt, "th", 0));
+    assert_eq!(th.rect[3], c0.rect[3], "and the header's own padding");
+    assert_eq!(by_key(&rt, "r0").rect[3], cell(&rt, "r0", 0).rect[3]);
+}
+
+#[test]
+fn setters_take_non_finite_points_as_zero() {
+    fn wild(k: &Kit) -> MarkdownStyle {
+        MarkdownStyle::from_kit(k)
+            .table_card(k)
+            .table_frame(k.c.layer_01, k.c.border_muted, f32::INFINITY)
+            .table_body(k.c.bg_base, f32::NAN, &[])
+            .table_header_pad(f32::INFINITY, f32::NAN)
+            .table_cell_padding(f32::INFINITY, f32::NEG_INFINITY)
+            .table_min_column(f32::INFINITY)
+            .table_margin(f32::INFINITY, f32::NAN)
+    }
+    let rt = run(SRC, wild, 600.0);
+    for key in ["th", "tb", "r0"] {
+        assert!(by_key(&rt, key).rect.iter().all(|v| v.is_finite()), "{key}");
+    }
+}
+
+#[test]
+fn a_header_alone_is_sized_by_its_own_padding() {
+    fn padded(body: f32) -> impl Fn(&Kit) -> MarkdownStyle {
+        move |k| MarkdownStyle::from_kit(k).table_header_pad(6.0, 6.0).table_cell_padding(body, 6.0)
+    }
+    fn wide(k: &Kit) -> MarkdownStyle {
+        padded(30.0)(k)
+    }
+    fn same(k: &Kit) -> MarkdownStyle {
+        padded(6.0)(k)
+    }
+    let src = "| a | b |\n|---|---|\n";
+    let width = |style| cell(&run(src, style, 600.0), "th", 0).rect[2];
+    assert_eq!(width(wide), width(same));
+}

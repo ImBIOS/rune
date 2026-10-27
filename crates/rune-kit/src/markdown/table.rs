@@ -7,6 +7,11 @@ use super::style::{TableBody, TableFrame};
 /// Estimated bytes of column widths kept beyond the tables on screen.
 const WIDTHS_BYTES: usize = 1 << 20;
 
+/// A setter's points: zero when negative, NaN or infinite, so a width never goes non-finite.
+fn pts(x: f32) -> f32 {
+    if x.is_finite() { x.max(0.0) } else { 0.0 }
+}
+
 /// Per column: the content's width on one line and its longest word (capped), padding included.
 #[derive(Debug)]
 struct Columns {
@@ -45,6 +50,7 @@ impl MarkdownStyle {
     /// A table's outline and row rules, and its header row's fill.
     pub fn table(mut self, border: Color, header_fill: Color) -> Self {
         self.table_outline = Some(border);
+        self.table_frame = None;
         self.table_rule = border;
         self.table_head_fill = header_fill;
         self
@@ -53,6 +59,7 @@ impl MarkdownStyle {
     /// last row too, as on a web page. A [`Self::table_frame`] draws in its place.
     pub fn table_outline(mut self, outline: Option<Color>) -> Self {
         self.table_outline = outline;
+        self.table_frame = None;
         self
     }
     /// The hairline under the header and between rows.
@@ -91,7 +98,7 @@ impl MarkdownStyle {
     }
     /// The narrowest a column shrinks to when its longest word is wider (120 points by default).
     pub fn table_min_column(mut self, points: f32) -> Self {
-        self.table_min_column = points.max(0.0);
+        self.table_min_column = pts(points);
         self
     }
     /// The cells' font (the body font by default). The header takes it at the strong weight,
@@ -104,7 +111,7 @@ impl MarkdownStyle {
     /// Each cell's padding: `x` on the left and right, `y` above and below (10 and 6 points by
     /// default).
     pub fn table_cell_padding(mut self, x: f32, y: f32) -> Self {
-        self.table_pad = [x.max(0.0), y.max(0.0)];
+        self.table_pad = [pts(x), pts(y)];
         self
     }
     /// Whether the first column starts at the table's left edge, with no left padding, so its
@@ -123,12 +130,15 @@ impl MarkdownStyle {
         self.table_rule = t.rule;
         self.table_head_text = t.header_text;
         self.table_outline = self.table_outline.map(|_| t.rule);
+        self.table_frame = None;
+        self.table_body = None;
+        self.table_head_pad = None;
         self
     }
     /// A rounded frame around the table in place of the outline: filled `fill`, with a
     /// half-point `ring` drawn inside its edge and `pad` points between the edge and the rows.
     pub fn table_frame(mut self, fill: Color, ring: Color, pad: f32) -> Self {
-        self.table_frame = Some(TableFrame { fill, ring, pad: pad.max(0.0) });
+        self.table_frame = Some(TableFrame { fill, ring, pad: pts(pad) });
         self
     }
     /// The body rows on a card of their own inside the frame: filled `fill`, rounded `radius`,
@@ -136,13 +146,13 @@ impl MarkdownStyle {
     /// then sits on the frame with no fill and no rule under it, and rules run between body
     /// rows only.
     pub fn table_body(mut self, fill: Color, radius: f32, shadows: &[rune::Shadow]) -> Self {
-        self.table_body = Some(TableBody { fill, radius: radius.max(0.0), shadows: shadows.to_vec() });
+        self.table_body = Some(TableBody { fill, radius: pts(radius), shadows: shadows.to_vec() });
         self
     }
     /// The header cells' padding, `x` on the left and right and `y` above and below (the body
     /// cells' [`Self::table_cell_padding`] by default).
     pub fn table_header_pad(mut self, x: f32, y: f32) -> Self {
-        self.table_head_pad = Some([x.max(0.0), y.max(0.0)]);
+        self.table_head_pad = Some([pts(x), pts(y)]);
         self
     }
     /// Whether a table fills the text's width (a web table's `width: 100%`), the extra space
@@ -155,7 +165,7 @@ impl MarkdownStyle {
     /// The space above and below a table (12 and 16 points by default). Like the other blocks'
     /// margins, it collapses with the space a neighbour wants, taking the larger.
     pub fn table_margin(mut self, top: f32, bottom: f32) -> Self {
-        self.table_margin = [top.max(0.0), bottom.max(0.0)];
+        self.table_margin = [pts(top), pts(bottom)];
         self
     }
     /// A data table on a card, from the kit's tokens: the body rows on a raised `bg_base` card
@@ -233,7 +243,14 @@ impl Renderer {
             if let Some(ring) = ring {
                 frame = frame.radius(6.0).border(0.5, ring);
             }
-            frame = frame.child(head.clip_soft(0.0));
+            // The header's overflow stops at the frame's rounded top corners.
+            let head = if ring.is_some() || fill.is_some() {
+                let r = (6.0 - inset).max(0.0);
+                head.clip_corners([r, r, 0.0, 0.0])
+            } else {
+                head.clip_soft(0.0)
+            };
+            frame = frame.child(head);
             if !t.rows.is_empty() {
                 let mut rows = col().key("tbc").w_full().clip_rounded(body.radius);
                 for (i, cells) in t.rows.iter().enumerate() {
@@ -264,7 +281,9 @@ impl Renderer {
         if self.scroll_wide {
             // Every column at its natural width, scrolling when the table is wider than the text.
             // Full width: the viewport makes `w_full` content its natural width, or its own if wider.
-            let frame = if s.table_full_width { frame } else { frame.w(total + 2.0 * inset) };
+            // Capped at the natural width either way, so a row still streaming in can't widen
+            // the frame in the viewport's max-content pass and shift every column.
+            let frame = if s.table_full_width { frame.max_w(total + 2.0 * inset) } else { frame.w(total + 2.0 * inset) };
             return col().key("scroll").w_full().scroll_x().child(frame);
         }
         frame
@@ -356,8 +375,14 @@ impl Renderer {
         let (head_natural, head_min) = widths(&mut std::iter::once(&t.head), head);
         let (body_natural, body_min) = widths(&mut rows.iter(), body);
         let [head_x, body_x] = [self.head_pad()[0], self.s.table_pad[0]];
+        let has_body = !rows.is_empty();
         let padded = |h: &[f32], b: &[f32]| -> Vec<f32> {
-            (0..n).map(|j| (h[j] + self.pad_left(j, head_x) + head_x).max(b[j] + self.pad_left(j, body_x) + body_x)).collect()
+            (0..n)
+                .map(|j| {
+                    let head = h[j] + self.pad_left(j, head_x) + head_x;
+                    if has_body { head.max(b[j] + self.pad_left(j, body_x) + body_x) } else { head }
+                })
+                .collect()
         };
         let cols = Rc::new(Columns { natural: padded(&head_natural, &body_natural), min: padded(&head_min, &body_min) });
         WIDTHS.with_borrow_mut(|c| c.insert(key, cols.clone(), 8 * n + 64));
