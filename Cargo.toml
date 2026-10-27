@@ -9,6 +9,7 @@ members = [
     "crates/rune-light",
     "crates/procwatch",
     "crates/rune-knobs",
+    "crates/rune-mac",
     "themes/opencode",
     "examples/hello",
     "examples/web-hello",
