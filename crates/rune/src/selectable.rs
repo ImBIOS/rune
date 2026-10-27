@@ -65,11 +65,37 @@ impl SelectedText {
     pub fn text(&self) -> &str { &self.text }
 }
 
-/// `Tx::text_selection`'s snapshot and what it was taken from: the commit and the selection's
-/// ends.
-pub(super) struct Snapshot {
-    from: (u64, Option<String>, usize, usize, Option<String>),
+/// What an [`El::on_selection_change`] element hears.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionChange {
     selection: Option<Rc<TextSelection>>,
+    was: bool,
+}
+
+impl SelectionChange {
+    /// The whole selection while any of it is inside the element, `None` otherwise.
+    pub fn selection(&self) -> Option<&TextSelection> { self.selection.as_deref() }
+    /// A selection appeared inside the element, where there was none.
+    pub fn started(&self) -> bool { !self.was && self.selection.is_some() }
+    /// The selection cleared or left the element.
+    pub fn cleared(&self) -> bool { self.was && self.selection.is_none() }
+}
+
+/// The commit and the selection's ends: what a selection read from them depends on.
+type Basis = (u64, Option<String>, usize, usize, Option<String>);
+
+/// `Tx::text_selection`'s snapshot and what it was taken from.
+pub(super) struct Snapshot {
+    from: Basis,
+    selection: Option<Rc<TextSelection>>,
+}
+
+/// What each `El::on_selection_change` element last heard, by path, and what that was checked
+/// against.
+#[derive(Default)]
+pub(super) struct Heard {
+    from: Option<Basis>,
+    by_path: HashMap<String, Rc<TextSelection>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -342,14 +368,50 @@ impl<S: 'static> Runtime<S> {
 
     /// [`Runtime::selection`] for a handler's `Tx`, kept until a commit or the selection changes.
     pub(super) fn selection_snapshot(&self) -> Option<Rc<TextSelection>> {
-        let sel = &self.text_sel;
-        sel.path.as_ref()?;
-        let from = (self.commits, sel.path.clone(), sel.anchor, sel.focus, sel.far.as_ref().map(|f| f.0.clone()));
+        self.text_sel.path.as_ref()?;
+        let from = self.selection_from();
         let mut cache = self.sel_snapshot.borrow_mut();
         if let Some(s) = cache.as_ref().filter(|s| s.from == from) { return s.selection.clone(); }
         let selection = self.selection().map(Rc::new);
         *cache = Some(Snapshot { from, selection: selection.clone() });
         selection
+    }
+
+    fn selection_from(&self) -> Basis {
+        let sel = &self.text_sel;
+        (self.commits, sel.path.clone(), sel.anchor, sel.focus, sel.far.as_ref().map(|f| f.0.clone()))
+    }
+
+    /// The `El::on_selection_change` calls owed since the last check: each element whose part
+    /// of the selection changed, started or cleared.
+    pub(super) fn selection_changes(&mut self) -> Vec<Action> {
+        let from = self.selection_from();
+        if self.sel_heard.from.as_ref() == Some(&from) { return Vec::new(); }
+        self.sel_heard.from = Some(from);
+        let watchers: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].on_selection_change.is_some()).collect();
+        if watchers.is_empty() && self.sel_heard.by_path.is_empty() { return Vec::new(); }
+        let sel = self.selection_snapshot();
+        let selected: Vec<usize> = match sel {
+            Some(_) => self.selection_ranges().into_iter().filter(|r| r.1 < r.2).map(|r| r.0).collect(),
+            None => Vec::new(),
+        };
+        let inside = |w: usize, j: usize| std::iter::successors(Some(j), |&p| self.nodes[p].parent).any(|p| p == w);
+        let (mut out, mut heard) = (Vec::new(), HashMap::new());
+        for w in watchers {
+            let path = self.nodes[w].path.clone();
+            let now = sel.clone().filter(|_| selected.iter().any(|&j| inside(w, j)));
+            let before = self.sel_heard.by_path.remove(&path);
+            let same = match (&before, &now) {
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b) || a == b,
+                (a, b) => a.is_none() && b.is_none(),
+            };
+            if !same {
+                out.push(Action::SelectionChange(path.clone(), SelectionChange { selection: now.clone(), was: before.is_some() }));
+            }
+            if let Some(now) = now { heard.insert(path, now); }
+        }
+        self.sel_heard.by_path = heard;
+        out
     }
 
     /// Node `i` as a [`SelectedText`] with `range` selected, its path relative to `base`'s.

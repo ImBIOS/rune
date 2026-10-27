@@ -109,7 +109,7 @@ mod gesture_dispatch;
 mod flights;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
-pub use selectable::{SelectedText, TextSelection};
+pub use selectable::{SelectedText, SelectionChange, TextSelection};
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
@@ -453,6 +453,8 @@ pub(crate) struct Node {
     selection_group: bool,
     /// `El::selection_copy`.
     selection_copy: Option<crate::el::SelectionCopy>,
+    /// `El::on_selection_change`.
+    on_selection_change: Option<crate::el::SelectionChangeFn>,
     a11y: crate::el::A11y,
     /// Inside an `El::inert` subtree (this element or an ancestor).
     pub(crate) inert: bool,
@@ -505,6 +507,8 @@ enum Action {
     PointerMove(String, PointerEvent),
     Hover(String),
     HoverChange(String, bool),
+    /// `El::on_selection_change`.
+    SelectionChange(String, crate::SelectionChange),
     AtBottom(String, bool),
     FarFromBottom(String, bool),
     VisibleRows(String, std::ops::Range<usize>),
@@ -1229,6 +1233,8 @@ pub struct Runtime<S: 'static> {
     text_sel: selectable::Held,
     /// `Tx::text_selection`'s snapshot, kept while neither a commit nor the selection changed.
     sel_snapshot: std::cell::RefCell<Option<selectable::Snapshot>>,
+    /// What each `El::on_selection_change` element (by path) last heard.
+    sel_heard: selectable::Heard,
     /// Modifier keys held now, as the window last reported them (`Tx::mods`).
     held_mods: crate::Mods,
     /// `El::help` tooltips.
@@ -1567,6 +1573,7 @@ impl<S: 'static> Runtime<S> {
             links: Default::default(),
             text_sel: Default::default(),
             sel_snapshot: Default::default(),
+            sel_heard: Default::default(),
             held_mods: Default::default(),
             help: Default::default(),
             help_delay: 0.5,
@@ -2430,6 +2437,8 @@ impl<S: 'static> Runtime<S> {
             }
             self.run_pick_reads(&mut tx);
         }
+        // Once a frame, however often a drag moved the selection, and in time for this commit.
+        for action in self.selection_changes() { ran |= self.run_action(action, &mut tx); }
         let mut open_urls = std::mem::take(&mut tx.open_urls);
         self.latch_requests(&mut tx);
         // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
@@ -2473,6 +2482,9 @@ impl<S: 'static> Runtime<S> {
             self.apply_keeps();
         }
         if let Some(request) = tx.select.take() { self.select_request(request); }
+        // What the commit or a `Tx::select_text` changed is heard next frame.
+        let changes = self.selection_changes();
+        self.queue.extend(changes);
         #[cfg(debug_assertions)]
         { self.live_check = None; }
         tx.keep_on_screen.clear();
@@ -2884,6 +2896,11 @@ impl<S: 'static> Runtime<S> {
             Action::HoverChange(path, inside) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()) else { return false };
                 f(handler_state(&mut self.state), inside, &mut one);
+                true
+            }
+            Action::SelectionChange(path, change) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_selection_change.clone()) else { return false };
+                f(handler_state(&mut self.state), &change, &mut one);
                 true
             }
             Action::Press(path, button) => {
@@ -8348,6 +8365,7 @@ fn live_only_handler(action: &Action) -> Option<&'static str> {
         Action::PointerMove(..) => "on_pointer_move_local",
         Action::Hover(_) => "on_hover",
         Action::HoverChange(..) => "on_hover_change",
+        Action::SelectionChange(..) => "on_selection_change",
         Action::Press(..) => "on_press",
         Action::DoublePress(_) => "on_double_press",
         Action::Link(..) => "on_link",
@@ -8374,7 +8392,7 @@ pub(crate) fn fold_live(live: &mut Option<bool>, took: bool, one: &Tx) {
 #[cfg(debug_assertions)]
 fn action_path(action: &Action) -> Option<&str> {
     match action {
-        Action::PointerMove(path, _) | Action::DrawnLayout(path, ..) | Action::Hover(path) | Action::HoverChange(path, _) | Action::Press(path, _) | Action::DoublePress(path)
+        Action::PointerMove(path, _) | Action::DrawnLayout(path, ..) | Action::Hover(path) | Action::HoverChange(path, _) | Action::SelectionChange(path, _) | Action::Press(path, _) | Action::DoublePress(path)
         | Action::Link(path, _) | Action::SecondaryPress(path, _) | Action::Drag(path, ..) | Action::DragStart(path)
         | Action::DragEnd(path, _) => Some(path),
         Action::Wheel(_, chain, _) | Action::Gesture(chain, _) => chain.first().map(String::as_str),
@@ -9074,6 +9092,7 @@ fn flatten(
         aspect_fit,
         selection_group,
         selection_copy,
+        on_selection_change,
         a11y,
         inert,
         ..
@@ -9200,6 +9219,7 @@ fn flatten(
         window_drag,
         selection_group,
         selection_copy,
+        on_selection_change,
         a11y,
         inert,
         press_scale,

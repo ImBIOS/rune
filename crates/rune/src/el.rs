@@ -1322,6 +1322,8 @@ impl std::fmt::Debug for ClipboardRead {
 }
 /// What an `El::selection_copy` element copies for a selection inside it.
 pub(crate) type SelectionCopy = Rc<dyn Fn(&crate::TextSelection) -> Option<String>>;
+/// `El::on_selection_change`.
+pub(crate) type SelectionChangeFn = Rc<dyn Fn(&mut dyn Any, &crate::SelectionChange, &mut Tx)>;
 
 /// A scroll viewport's content-aware edges: `El::scroll_edge_fade` and `El::scroll_margin`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1436,6 +1438,8 @@ pub struct El {
     pub(crate) selection_group: bool,
     /// `El::selection_copy`.
     pub(crate) selection_copy: Option<SelectionCopy>,
+    /// `El::on_selection_change`.
+    pub(crate) on_selection_change: Option<SelectionChangeFn>,
     /// `El::level` and `El::expanded`.
     pub(crate) a11y: A11y,
     pub(crate) inert: bool,
@@ -1517,6 +1521,7 @@ fn base(dir: FlexDirection) -> El {
         aspect_fit: 0.0,
         selection_group: false,
         selection_copy: None,
+        on_selection_change: None,
         a11y: A11y::default(),
         inert: false,
     }
@@ -3335,6 +3340,27 @@ impl El {
     /// [`TextSelection::text`]: crate::TextSelection::text
     pub fn selection_copy(mut self, f: impl Fn(&crate::TextSelection) -> Option<String> + 'static) -> Self {
         self.selection_copy = Some(Rc::new(f));
+        self
+    }
+    /// Hears the [`El::selectable`] text selection change inside this element: when one starts
+    /// (the first selected character of a drag, a double-click's word, Cmd+A,
+    /// [`Tx::select_text`]), changes, leaves this element or clears. [`SelectionChange`] holds
+    /// the whole selection while any of it is inside this element, `None` otherwise, and says
+    /// whether it [`started`](crate::SelectionChange::started) or
+    /// [`cleared`](crate::SelectionChange::cleared) here. It runs at most once a frame, however
+    /// many times a drag moved the selection, before that frame's commit. A press that leaves
+    /// only a caret selects nothing, so it isn't heard. Call [`Tx::live_only`] when nothing the
+    /// view reads changed, so a drag doesn't rebuild the view each frame.
+    ///
+    /// ```ignore
+    /// col().selection_group(true).on_selection_change(|s: &mut Notes, change, _| {
+    ///     if change.started() { s.whole_note_highlight = false; }
+    /// })
+    /// ```
+    ///
+    /// [`SelectionChange`]: crate::SelectionChange
+    pub fn on_selection_change<S: 'static>(mut self, f: impl Fn(&mut S, &crate::SelectionChange, &mut Tx) + 'static) -> Self {
+        self.on_selection_change = Some(Rc::new(move |s, change, tx| f(downcast::<S>(s), change, tx)));
         self
     }
     /// Draws and lays out, but the pointer and keyboard pass through this element and

@@ -1,13 +1,18 @@
 //! The text selection from code: `Tx::select_text`, `Tx::select_all_text` and
 //! `Tx::clear_text_selection` set it after the handler's commit (in time for a key in the same
-//! frame), `Tx::text_selection` reads it, and `El::selection_copy` decides what copying takes.
+//! frame), `Tx::text_selection` reads it, `El::selection_copy` decides what copying takes and
+//! `El::on_selection_change` hears it change.
 use std::cell::RefCell;
 use std::ops::Range;
 
 use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TextSelection, TextStyle, col, row, text, text_input};
 
 #[derive(Default)]
-struct S { extra: bool, seen: Option<TextSelection>, field: TextEdit, app_keys: Vec<char> }
+struct S { extra: bool, seen: Option<TextSelection>, field: TextEdit, app_keys: Vec<char>, heard: Vec<Heard> }
+
+/// One `on_selection_change` call: started, cleared, and the selection's text.
+#[derive(Debug, PartialEq)]
+struct Heard(bool, bool, Option<String>);
 
 thread_local! {
     /// What the `selection_copy` provider saw last: (path, range, whole).
@@ -19,6 +24,7 @@ fn view(s: &S, _: &mut Cx<S>) -> El {
     let t = |content: &str, key: &str| text(content.to_owned()).key(key).font(style).w_full().selectable(true);
     col().w_full().h_full().padding(10.0).gap(12.0)
         .child(col().key("doc").w(400.0).gap(12.0).selection_group(true)
+            .on_selection_change(|s: &mut S, c, _| s.heard.push(Heard(c.started(), c.cleared(), c.selection().map(|t| t.text().to_owned()))))
             .selection_copy(|sel| {
                 ASKED.with_borrow_mut(|a| *a = sel.texts().iter().map(|t| (t.path().to_owned(), t.range(), t.is_whole())).collect());
                 sel.texts().iter().all(|t| t.is_whole()).then(|| "SOURCE".to_owned())
@@ -204,4 +210,71 @@ fn a_focused_field_keeps_its_copy_keys_from_the_app() {
     command(&mut rt, 'c');
     assert_eq!(clipboard.text().as_deref().map(String::as_str), Some("field words"));
     assert!(rt.state.app_keys.is_empty(), "{:?}", rt.state.app_keys);
+}
+
+fn heard(rt: &mut Runtime<S>) -> Vec<Heard> { std::mem::take(&mut rt.state.heard) }
+
+#[test]
+fn on_selection_change_hears_a_drag_start_change_and_clear_once_a_frame() {
+    let mut rt = runtime();
+    let a = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("a")).unwrap();
+    let (x0, y) = (a.rect[0] + 1.0, a.rect[1] + a.rect[3] / 2.0);
+    rt.pointer_move(x0, y);
+    rt.pointer_down(x0, y);
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [], "a press leaves only a caret");
+    // Three moves a frame, heard once a frame: started, then changed.
+    let mut frames = 0;
+    for step in 1..=3 {
+        for k in 1..=3 {
+            let x = x0 + (step * 3 + k - 3) as f32 * 6.0;
+            rt.pointer_move(x, y);
+        }
+        tick(&mut rt);
+        frames += 1;
+    }
+    let calls = heard(&mut rt);
+    assert_eq!(calls.len(), frames, "{calls:?}");
+    assert!(calls[0].0 && !calls[0].1, "the first is the start: {calls:?}");
+    assert!(calls[1..].iter().all(|c| !c.0 && !c.1 && c.2.as_ref().is_some_and(|t| "first paragraph".starts_with(t.as_str()))), "{calls:?}");
+    rt.pointer_up(x0 + 54.0, y);
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [], "releasing changes nothing");
+
+    // Cmd+A widens it; a click outside the group clears it.
+    command(&mut rt, 'a');
+    assert_eq!(heard(&mut rt), [Heard(false, false, Some("first paragraph\nsecond".into()))]);
+    let lone = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("lone")).unwrap();
+    let (x, y) = (lone.rect[0] + 5.0, lone.rect[1] + lone.rect[3] / 2.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [Heard(false, true, None)]);
+}
+
+#[test]
+fn on_selection_change_hears_code_and_selections_elsewhere_dont_reach_it() {
+    let mut rt = runtime();
+    act(&mut rt, |tx| tx.select_text("b", 0..3));
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [Heard(true, false, Some("sec".into()))]);
+    act(&mut rt, |tx| tx.select_all_text("doc"));
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [Heard(false, false, Some("first paragraph\nsecond".into()))]);
+    // The same selection again is no change.
+    act(&mut rt, |tx| tx.select_all_text("doc"));
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), []);
+    // Moving to a text outside it leaves it: cleared, and nothing more while it's elsewhere.
+    act(&mut rt, |tx| tx.select_all_text("lone"));
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [Heard(false, true, None)]);
+    act(&mut rt, |tx| tx.select_text("lone", 0..4));
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), []);
+    act(&mut rt, |tx| tx.select_all_text("a"));
+    act(&mut rt, |tx| tx.clear_text_selection());
+    tick(&mut rt);
+    assert_eq!(heard(&mut rt), [Heard(true, false, Some("first paragraph".into())), Heard(false, true, None)]);
 }

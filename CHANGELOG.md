@@ -13,6 +13,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `Tx::select_all_text(key)`, `Tx::clear_text_selection()` (applied after the handler's
   commit), `El::selection_copy(|sel| ..)` to choose what Cmd+C and the Copy menu copy, and kit's
   `Markdown::copy_source(true)`, which copies the Markdown source of whole top-level blocks.
+  `El::on_selection_change(|s, change, tx| ..)` hears a selection start, change and clear
+  (`SelectionChange::started`, `cleared`, `selection`), at most once a frame.
+
 Entries landed since the last fold are in `changelog/unreleased/`.
 
 - **macOS windows take drops of file promises and image data.** winit's window took only

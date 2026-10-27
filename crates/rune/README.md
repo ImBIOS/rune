@@ -1133,6 +1133,14 @@ unselected texts with an empty range), and returning `None` copies the text as d
 one around both ends of the selection answers. An app that wants Cmd+C or Cmd+A for something
 else takes it in `on_key`, which sees it before the selection does.
 
+`El::on_selection_change(|s, change, tx| ..)` hears the selection start, change, leave the
+element or clear, however it happened: a drag (from its first selected character), a double- or
+triple-click, Cmd+A, a click elsewhere, or `tx.select_text`. `change.selection()` is the whole
+selection while any of it is inside the element, and `change.started()` and `change.cleared()`
+say which edge it was. It runs at most once a frame during a drag, before the frame's commit; a
+press that leaves only a caret isn't heard. Call `tx.live_only()` in it when the view reads
+nothing it changed.
+
 ```rust
 col().key("note").selection_group(true).children(paragraphs)
     .selection_copy(move |sel| sel.texts().iter().all(|t| t.is_whole()).then(|| source.clone()))
@@ -1140,6 +1148,10 @@ col().key("note").selection_group(true).children(paragraphs)
 // Select a note's text from code, then read it back in a later handler.
 tx.select_all_text("note");
 let picked = tx.text_selection().map(|s| s.text().to_owned());
+
+// Drop the app's own highlight once people start selecting.
+col().key("note").selection_group(true)
+    .on_selection_change(|s: &mut Notes, change, _| if change.started() { s.highlight = false });
 ```
 
 ### Help tooltips

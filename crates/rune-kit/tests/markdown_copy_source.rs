@@ -1,6 +1,6 @@
 //! `Markdown::copy_source`: copying a selection copies the Markdown source of the top-level
 //! blocks it touches, the whole source verbatim for all of them, and the drawn text for part
-//! of one block.
+//! of one block. And an app's `on_key` sees Cmd+A before a selectable note does.
 #![cfg(feature = "markdown")]
 
 use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, col};
@@ -76,4 +76,31 @@ fn without_copy_source_copying_takes_the_drawn_text() {
     let (mut rt, clipboard) = runtime(false);
     let all = copy(&mut rt, &clipboard, |tx| tx.select_all_text("note"));
     assert_eq!(all, "Title\nHello world and link.\nalpha\nbeta\nfn main() {}\nLast line.");
+}
+
+#[derive(Default)]
+struct Keys { takes: bool, keys: Vec<Key> }
+
+fn short(_: &Keys, _: &mut Cx<Keys>) -> El {
+    col().w_full().padding(10.0).child(Markdown::new("a\n\nb").selectable(true).build(&Kit::neutral(true)).key("note"))
+}
+
+#[test]
+fn an_apps_on_key_sees_cmd_a_before_a_clicked_note() {
+    for takes in [true, false] {
+        let mut rt = Runtime::new(Keys { takes, keys: Vec::new() }, short, (300.0, 200.0), Env::new(true, 2.0));
+        rt.on_key = Some(|s, ev, _| { s.keys.push(ev.key.clone()); s.takes && ev.key == Key::Command('a') });
+        rt.frame(0.0);
+        let a = rt.elements().into_iter().find(|e| e.path.ends_with("note/b0")).expect("the first paragraph");
+        let (x, y) = (a.rect[0] + 3.0, a.rect[1] + a.rect[3] / 2.0);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Mods::default() } });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.keys, [Key::Command('a')], "takes={takes}");
+        let want = if takes { None } else { Some("a\nb") };
+        assert_eq!(rt.selected_text().as_deref(), want, "takes={takes}: passed on, the note selects all");
+    }
 }
