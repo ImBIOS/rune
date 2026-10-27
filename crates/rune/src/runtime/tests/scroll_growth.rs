@@ -236,3 +236,25 @@ fn a_window_resize_lands_rewrapped_rows_under_a_pinned_tail() {
     let measured = rt.nodes.iter().find(|n| n.id == first).unwrap().local.h;
     assert_eq!(rt.grows[&first].h, measured, "and its slot landed with it");
 }
+
+#[test]
+fn rows_all_leaving_a_padded_growth_stack_hold_their_place() {
+    use crate::el::GrowthSpec;
+    fn view(n: &usize, _cx: &mut Cx<usize>) -> El {
+        let stack = col().key("stack").w_full().padding(8.0).growth(GrowthSpec::default())
+            .children((0..*n).map(|i| el().key(format!("r{i}")).h(20.0).w_full().fill(Color::WHITE)));
+        col().key("root").size(200.0, 200.0).child(stack)
+    }
+    let tops = |rt: &Runtime<usize>| -> Vec<f32> {
+        (0..3).filter_map(|i| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(&*format!("r{i}"))).map(|e| e.rect[1])).collect()
+    };
+    for left in [0usize, 1] {
+        let mut rt = Runtime::new(3usize, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(tops(&rt), [8.0, 28.0, 48.0]);
+        rt.update(|n, _| *n = left);
+        rt.frame(1.0 / 120.0);
+        let now = tops(&rt);
+        assert_eq!(now[..2], [8.0, 28.0], "{left} left: the leaving rows hold on frame 1: {now:?}");
+    }
+}
