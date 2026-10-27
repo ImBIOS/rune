@@ -576,3 +576,6 @@ fn a_long_story_list_scrolls_and_reaches_what_was_off_screen() {
 
 #[path = "playground/groups_tests.rs"]
 mod groups;
+
+#[path = "playground/scenes_tests.rs"]
+mod scenes;

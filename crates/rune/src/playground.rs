@@ -157,6 +157,7 @@ pub struct Playground<S: 'static> {
     shortcut: Option<Shortcut>,
     bar: bool,
     enabled: bool,
+    scenes: Option<fn(&str) -> bool>,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -177,6 +178,7 @@ impl<S: 'static> Playground<S> {
             shortcut: shortcut.parse().ok(),
             bar: true,
             enabled: cfg!(debug_assertions),
+            scenes: None,
         }
     }
 
@@ -206,6 +208,13 @@ impl<S: 'static> Playground<S> {
     /// See [`Story::side`].
     pub fn side(mut self, scene: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
         self.sides.push((scene, view));
+        self
+    }
+
+    /// Which of `AppSpec::scenes` the list shows, by name: `|name| name.contains('/')` keeps
+    /// ungrouped scenes to `--scene`. By default, all of them.
+    pub fn scenes(mut self, show: fn(&str) -> bool) -> Self {
+        self.scenes = Some(show);
         self
     }
 
@@ -379,7 +388,7 @@ pub(crate) fn offered_by_env() -> bool {
 
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _ } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
@@ -410,18 +419,19 @@ impl<S: 'static> Live<S> {
         };
         // Scene names as `find` takes them: a path or a name, matching case if it can.
         let scene = |live: &Self, name: &str| {
-            let at = live.find_among(name, live.scenes.len());
+            let at = live.find_in(name, &(0..live.scenes.len()).collect::<Vec<_>>());
             if at.is_none() { eprintln!("rune: the playground has a trigger or side column for {name:?}, which isn't one of AppSpec::scenes"); }
             at
         };
         live.triggers = triggers.into_iter().filter_map(|(name, t)| Some((scene(&live, name)?, t))).collect();
         live.sides = sides.into_iter().filter_map(|(name, view)| Some((scene(&live, name)?, view))).collect();
+        let listed: Vec<usize> = (0..live.count()).filter(|&i| live.scenes.get(i).is_none_or(|(name, _)| show.is_none_or(|show| show(name)))).collect();
         let mut groups: Vec<&str> = Vec::new();
-        for i in 0..live.count() {
+        for &i in &listed {
             let group = live.group(i);
             if !groups.contains(&group) { groups.push(group); }
         }
-        live.order = groups.iter().flat_map(|g| (0..live.count()).filter(|&i| live.group(i) == *g).collect::<Vec<_>>()).collect();
+        live.order = groups.iter().flat_map(|g| listed.iter().copied().filter(|&i| live.group(i) == *g)).collect();
         live.selected = live.order.first().copied().unwrap_or(0);
         live
     }
@@ -449,16 +459,18 @@ impl<S: 'static> Live<S> {
         split(self.path(i), "").1
     }
 
-    /// The story called `name`: its path, or just its name, matching case only if need be.
+    /// The listed story called `name`: its path, or just its name, matching case only if need be.
     fn find(&self, name: &str) -> Option<usize> {
-        self.find_among(name, self.count())
+        let mut listed = self.order.clone();
+        listed.sort_unstable();
+        self.find_in(name, &listed)
     }
 
-    /// [`Live::find`] among the first `n` stories.
-    fn find_among(&self, name: &str, n: usize) -> Option<usize> {
-        let exact = |i: &usize| self.path(*i) == name || self.name(*i) == name;
-        let loose = |i: &usize| self.path(*i).eq_ignore_ascii_case(name) || self.name(*i).eq_ignore_ascii_case(name);
-        (0..n).find(exact).or_else(|| (0..n).find(loose))
+    /// [`Live::find`] among `ids`, in order.
+    fn find_in(&self, name: &str, ids: &[usize]) -> Option<usize> {
+        let exact = |i: &&usize| self.path(**i) == name || self.name(**i) == name;
+        let loose = |i: &&usize| self.path(**i).eq_ignore_ascii_case(name) || self.name(**i).eq_ignore_ascii_case(name);
+        ids.iter().find(exact).or_else(|| ids.iter().find(loose)).copied()
     }
 
     fn page(&self) -> Option<(usize, &Page<S>)> {

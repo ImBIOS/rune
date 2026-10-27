@@ -28,7 +28,7 @@ impl<S: 'static> Live<S> {
     }
 
     fn bar_view(&self, t: Theme) -> El {
-        let stories = match self.count() { 0 => String::new(), 1 => "1 story".into(), n => format!("{n} stories") };
+        let stories = match self.order.len() { 0 => String::new(), 1 => "1 story".into(), n => format!("{n} stories") };
         let hint = self.shortcut.as_ref().map(keycaps);
         let summary = [Some(stories).filter(|s| !s.is_empty()), hint].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let open = row().key("playground-open").h(20.0).ml(4.0).px(6.0).gap(6.0).center_y().radius(radius::SM - 1.0)
