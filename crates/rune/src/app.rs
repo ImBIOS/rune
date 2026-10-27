@@ -48,6 +48,7 @@ pub struct App<S: 'static> {
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
+    pub(crate) on_ime: Option<fn(&mut S, &crate::Ime, &mut Tx) -> bool>,
     pub(crate) on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
     pub(crate) on_open_url: Option<crate::open_url_in::OnOpenUrl<S>>,
     pub(crate) shared: Arc<Shared<S>>,
@@ -82,6 +83,7 @@ impl<S: 'static> App<S> {
             keep_running: false,
             on_close: None,
             on_focus: None,
+            on_ime: None,
             on_reopen: None,
             on_open_url: None,
             shared,
@@ -164,6 +166,22 @@ impl<S: 'static> App<S> {
     /// Headless scripts deliver the same callback with `{"focus": false}`.
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut Tx)) -> Self {
         self.on_focus = Some(f);
+        self
+    }
+
+    /// Hear the input method for an editor the app draws itself, whose caret is marked with
+    /// [`El::ime_cursor`](crate::El::ime_cursor): `Ime::Preedit` with its cursor range (draw it
+    /// at the caret, not yet in the text; empty ends it), `Ime::Commit` (insert it) and
+    /// `Ime::Enabled`/`Disabled`. Return true when the editor took the event. A focused
+    /// `text_input` takes them instead, but a composition this hook has open ends here even
+    /// after focus moved.
+    ///
+    /// Typing reaches the editor once: a plain character arrives as a key, `Key::Text` in
+    /// `on_key`, and `Ime::Commit` carries only what an input method composed (⌥E E's `é`, a
+    /// CJK conversion, the emoji picker, dictation), as for `text_input`. While a composition
+    /// is open, Return and Escape go to the input method, not `on_key`. Native windows only.
+    pub fn on_ime(mut self, f: fn(&mut S, &crate::Ime, &mut Tx) -> bool) -> Self {
+        self.on_ime = Some(f);
         self
     }
 

@@ -133,6 +133,8 @@ mod timer_wake;
 mod props;
 #[path = "runtime/secondary.rs"]
 mod secondary;
+#[path = "runtime/app_ime.rs"]
+mod app_ime;
 #[path = "runtime/press_clicks.rs"]
 mod press_clicks;
 #[path = "runtime/window_requests.rs"]
@@ -431,6 +433,7 @@ pub(crate) struct Node {
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
+    ime_cursor: bool,
     /// `El::selection_group`.
     selection_group: bool,
     /// `El::selection_copy`.
@@ -984,6 +987,8 @@ struct LayoutEntry {
 pub struct Runtime<S: 'static> {
     pub state: S,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
+    /// `App::on_ime` and the composition it has open.
+    pub(crate) app_ime: app_ime::AppIme<S>,
     view: fn(&S, &mut Cx<S>) -> El,
     /// `App::playground`, when this run shows it.
     pub(crate) playground: Option<Box<crate::playground::Live<S>>>,
@@ -1626,6 +1631,7 @@ impl<S: 'static> Runtime<S> {
             window_focused: None,
             keys_lost: false,
             on_focus: None,
+            app_ime: Default::default(),
             live_subscriptions: Vec::new(),
             live_dirty: false,
             live_only_skips: 0,
@@ -2793,12 +2799,7 @@ impl<S: 'static> Runtime<S> {
             Action::KeyUp(ev) => self.route_key_up(&ev, &mut one),
             Action::Wheel(gesture, chain, ev) => self.run_wheel(gesture, chain, ev, &mut one),
             Action::Gesture(chain, gesture) => self.run_gesture(chain, gesture, &mut one),
-            Action::Ime(ev) => {
-                let active = self.composing() || matches!(&ev, Ime::Preedit(s, _) | Ime::Commit(s) if !s.is_empty());
-                let ran = self.with_focused(|e| e.ime(&ev), &mut one);
-                if ran && active { self.ime_eat_key_up = true; }
-                ran
-            }
+            Action::Ime(ev) => self.run_ime(ev, &mut one),
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
@@ -3152,7 +3153,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Whether the focused field has an input method composition (preedit) open.
     fn composing(&mut self) -> bool {
-        let Some(access) = self.focused_input().map(|i| i.access.clone()) else { return false };
+        let Some(access) = self.focused_input().map(|i| i.access.clone()) else { return self.app_ime.composing() };
         match access {
             Some(access) => access(states!(self)).preedit.is_some(),
             None => self.focused_input().is_some_and(|i| i.edit.preedit.is_some()),
@@ -6365,6 +6366,7 @@ impl<S: 'static> Runtime<S> {
                 .and_then(|_| input_caret(n, r, sc, s, &mut self.input_scroll));
             if let Some((_, area)) = input_caret
                 && n.input.as_ref().is_some_and(|input| !input.edit.is_secure()) { self.ime_area = Some(area); }
+            else if n.ime_cursor && self.ime_area.is_none() && self.allowed(i) && !self.subtree_exiting(i) { self.ime_area = Some(app_ime::area(r, s)); }
             let paint_visible = if in_cache {
                 r[2] >= clip[0] - filter_margin - 2.0
                     && r[0] <= clip[2] + filter_margin + 2.0

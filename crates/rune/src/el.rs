@@ -1244,6 +1244,8 @@ pub struct El {
     pub(crate) input: Option<Box<InputSpec>>,
     pub(crate) cursor: Option<Cursor>,
     pub(crate) window_drag: bool,
+    /// `El::ime_cursor`.
+    pub(crate) ime_cursor: bool,
     pub(crate) press_scale: Option<f32>,
     pub(crate) scale: f32,
     pub(crate) time_scale: f32,
@@ -1331,6 +1333,7 @@ fn base(dir: FlexDirection) -> El {
         input: None,
         cursor: None,
         window_drag: false,
+        ime_cursor: false,
         press_scale: None,
         scale: 1.0,
         time_scale: 1.0,
@@ -2322,6 +2325,16 @@ impl El {
     /// fields) keep their presses.
     pub fn window_drag(mut self) -> Self {
         self.window_drag = true;
+        self
+    }
+    /// The caret of an editor the app draws itself rather than with `text_input`: while this
+    /// element is drawn and no text field has focus, the window turns its input method on (dead
+    /// keys, CJK, the emoji picker, dictation), places the candidate window at this element's
+    /// drawn rect, and hands what it composes to [`App::on_ime`](crate::App::on_ime). Put it on
+    /// the caret you draw, only while the editor has the keyboard. A focused field's caret wins,
+    /// and a focused secure field keeps the input method off.
+    pub fn ime_cursor(mut self) -> Self {
+        self.ime_cursor = true;
         self
     }
     /// Mark the drawn, ancestor-clipped rectangle as native overlay input. Does not add a handler.

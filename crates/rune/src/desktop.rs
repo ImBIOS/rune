@@ -132,6 +132,7 @@ impl<S: 'static> Window<S> {
         let own = app.resolve_args(inherited);
         let comp = app.compositor.take();
         let (open, keep_running, on_close, on_focus, on_reopen) = (app.open, app.keep_running, app.on_close, app.on_focus, app.on_reopen);
+        let on_ime = app.on_ime;
         let native = std::mem::take(&mut app.macos_window);
         let (modifier_keys, tab_visits_controls, srgb_blend) = (app.modifier_keys, app.tab_visits_controls, app.srgb_blend);
         let titlebar_inset = if options.borderless { 0.0 } else { app.chrome.titlebar_inset() };
@@ -144,6 +145,7 @@ impl<S: 'static> Window<S> {
         let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
         crate::playground::attach(&mut rt, playground, &spec, own.playground.clone(), false);
         rt.on_focus = on_focus;
+        rt.app_ime.hook = on_ime;
         rt.set_modifier_keys(modifier_keys);
         rt.set_tab_visits_controls(tab_visits_controls);
         rt.set_srgb_blend(srgb_blend);

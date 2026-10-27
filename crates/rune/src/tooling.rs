@@ -1395,7 +1395,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     }
     let mut comp = app.compositor.take();
     let srgb_blend = app.srgb_blend;
-    let on_focus = app.on_focus;
+    let (on_focus, on_ime) = (app.on_focus, app.on_ime);
     let on_reopen = app.on_reopen;
     let source = read_script(&args);
     let script = source.as_ref().map(load_script).unwrap_or_default();
@@ -1431,6 +1431,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), false);
     rt.set_titlebar_inset(if app_options.borderless { 0.0 } else { chrome.titlebar_inset() });
     rt.on_focus = on_focus;
+    rt.app_ime.hook = on_ime;
     rt.transparent = transparent;
     rt.fit_height = fit_height;
     rt.set_srgb_blend(srgb_blend);

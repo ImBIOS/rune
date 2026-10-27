@@ -823,7 +823,7 @@ impl<S: 'static> Host<S> {
         let present_log = args.trace.as_ref().map(|_| Arc::default());
         let mut app = app;
         let comp = app.compositor.take();
-        let on_focus = app.on_focus;
+        let (on_focus, on_ime) = (app.on_focus, app.on_ime);
         let chrome = app.chrome;
         let srgb_blend = app.srgb_blend;
         let modifier_keys = app.modifier_keys;
@@ -849,6 +849,7 @@ impl<S: 'static> Host<S> {
             args.size = None;
         }
         rt.on_focus = on_focus;
+        rt.app_ime.hook = on_ime;
         rt.set_modifier_keys(modifier_keys);
         rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
@@ -3379,7 +3380,8 @@ impl<S: 'static> Host<S> {
                 match ime {
                     WIme::Preedit(s, cur) => rt.ime(Ime::Preedit(s, cur)),
                     WIme::Commit(s) => rt.ime(Ime::Commit(s)),
-                    _ => {}
+                    WIme::Enabled => rt.ime(Ime::Enabled),
+                    WIme::Disabled => rt.ime(Ime::Disabled),
                 }
                 l.window.request_redraw();
             }

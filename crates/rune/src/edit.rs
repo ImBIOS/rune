@@ -2262,6 +2262,7 @@ impl TextEdit {
                 let s = self.sanitize(s);
                 self.insert(&s);
             }
+            Ime::Enabled | Ime::Disabled => {}
         }
         EditOutcome::default()
     }

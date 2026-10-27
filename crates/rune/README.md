@@ -180,8 +180,8 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   flags (`focusable`, `focused`, `focusVisible`, `inert`) are the future platform AX hook.
 - **Key routing**: a key the OS delivers to the window goes to the first of these that takes it.
   Global shortcuts and native menu key equivalents are handled before the window sees the key.
-  1. Return and Escape while a field composes (IME preedit) go to the composition and no
-     further.
+  1. Return and Escape while a field composes (IME preedit), or while `App::on_ime`'s editor
+     does, go to the composition and no further.
   2. Return, with no modifiers, presses the window's (or open modal's) `default_button()`
      unless the focused element takes Return (see the table below).
   3. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
@@ -956,6 +956,16 @@ passes it through. Each Unicode scalar displays as one bullet, with model-byte
 selection and caret positions mapped to those bullets.
 Secure fields have no undo, copy, cut, IME composition, or inspector text. macOS
 Secure Event Input is held only while their native window is focused and visible.
+
+An editor the app draws itself (not a `text_input`) gets the input method too: mark the caret
+it draws with `.ime_cursor()` while the editor has the keyboard, and hear the events with
+`App::on_ime(|s, ime, tx| ..)`. While that caret is drawn and no field has focus, the window
+turns its input method on and places the candidate window at the caret. `Ime::Preedit` carries
+the composition and its cursor range (draw it, don't insert it; empty ends it), `Ime::Commit`
+the text to insert, and `Ime::Enabled` and `Disabled` the input method turning on and off.
+Typing arrives once: a plain character is a key (`Key::Text` in `on_key`), and `Ime::Commit`
+carries only what an input method composed (dead keys, CJK, the emoji picker, dictation). A
+focused field takes the events instead, and a focused secure field keeps the input method off.
 Model buffers and history wipe on drop; secure edits wipe replaced allocations.
 Use `replace_text(..)` or `clear()` for programmatic replacement. Direct assignment
 to the public `text: String` field bypasses replacement wiping.
