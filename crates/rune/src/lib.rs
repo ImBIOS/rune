@@ -38,7 +38,7 @@ pub(crate) fn with_scene_clock<T>(clock: SceneClock, f: impl FnOnce() -> T) -> T
     out
 }
 
-mod playground;
+pub mod playground;
 pub use playground::{Play, Playground, Step, Story};
 mod states;
 mod shortcuts;

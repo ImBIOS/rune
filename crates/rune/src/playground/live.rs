@@ -133,20 +133,6 @@ impl<S: 'static> Live<S> {
         split(self.path(i), "").1
     }
 
-    /// The listed story called `name`: its path, or just its name, matching case only if need be.
-    pub(super) fn find(&self, name: &str) -> Option<usize> {
-        let mut listed = self.order.clone();
-        listed.sort_unstable();
-        self.find_in(name, &listed)
-    }
-
-    /// [`Live::find`] among `ids`, in order.
-    pub(super) fn find_in(&self, name: &str, ids: &[usize]) -> Option<usize> {
-        let exact = |i: &&usize| self.path(**i) == name || self.name(**i) == name;
-        let loose = |i: &&usize| self.path(**i).eq_ignore_ascii_case(name) || self.name(**i).eq_ignore_ascii_case(name);
-        ids.iter().find(exact).or_else(|| ids.iter().find(loose)).copied()
-    }
-
     pub(super) fn page(&self) -> Option<(usize, &Page<S>)> {
         let i = self.selected.checked_sub(self.scenes.len())?;
         self.pages.get(i).map(|p| (i, p))
@@ -199,13 +185,10 @@ impl<S: 'static> Live<S> {
         for request in std::mem::take(&mut self.pending) {
             changed = true;
             match request {
-                Request::Open(name) => {
-                    let at = name.as_deref().and_then(|n| self.find(n));
-                    if !self.open || at.is_some() {
-                        self.open = true;
-                        if let Some(i) = at { self.reveal(i); }
-                        self.select(at.unwrap_or(self.selected), real);
-                    }
+                Request::Open(name) => self.open_story(name.as_deref(), real),
+                Request::OpenAt(name, variant) => {
+                    let name = self.resolve(&name, variant.as_deref());
+                    self.open_story(name.as_deref(), real);
                 }
                 Request::Close => self.close(real),
                 Request::Toggle if self.open => self.close(real),

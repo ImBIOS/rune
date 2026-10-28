@@ -26,6 +26,7 @@ const CONTROL: f32 = 24.0;
 
 mod live;
 mod nav;
+mod open;
 mod stage;
 mod story;
 mod testing;
@@ -34,6 +35,7 @@ mod view;
 
 pub(crate) use live::Live;
 use nav::Row;
+pub use open::slug;
 pub(crate) use stage::call;
 pub use stage::{Play, Step};
 use stage::{Stage, Trigger, trigger};
@@ -264,6 +266,8 @@ fn split(path: &'static str, default: &'static str) -> (&'static str, &'static s
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Request {
     Open(Option<String>),
+    /// [`Tx::open_playground_at`]: a story by path, name or slug, and a variant.
+    OpenAt(String, Option<String>),
     Close,
     Toggle,
     Select(usize),
@@ -286,7 +290,7 @@ pub(crate) enum Request {
 impl Request {
     /// Whether this one changes the stage's state, so handlers built for the old one must go.
     fn swaps_stage(&self) -> bool {
-        matches!(self, Request::Open(_) | Request::Close | Request::Toggle | Request::Select(_) | Request::Replay | Request::Variant(_))
+        matches!(self, Request::Open(_) | Request::OpenAt(..) | Request::Close | Request::Toggle | Request::Select(_) | Request::Replay | Request::Variant(_))
     }
 }
 
@@ -313,8 +317,8 @@ pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<
     if open.is_none() && (!windowed || hidden_by_env()) { return; }
     let mut live = Live::new(playground, spec, windowed && cfg!(target_os = "macos"));
     if let Some(name) = open {
-        let request = live.open_at(name.as_deref(), variant.as_deref()).unwrap_or_else(|e| crate::tooling::die(&e));
-        live.pending.push(request);
+        live.open_at(name.as_deref(), variant.as_deref()).unwrap_or_else(|e| crate::tooling::die(&e));
+        live.pending.push(Request::Open(name));
     }
     rt.playground = Some(Box::new(live));
 }

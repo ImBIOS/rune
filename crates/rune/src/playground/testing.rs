@@ -30,9 +30,10 @@ impl<S: 'static> App<S> {
 }
 
 impl<S: 'static> Runtime<S> {
-    /// Opens the playground at `story` (its `"Group/Name"` path, or just its name), on
-    /// `variant` (by number from 1, or by name) if given, as `--playground NAME --variant V`
-    /// does. Like a handler's [`Tx::open_playground`], it applies on a frame; this one takes
+    /// Opens the playground at `story` (its `"Group/Name"` path, its name, or its path's
+    /// [`slug`](crate::playground::slug)), on `variant` (by number from 1, or by name) if given,
+    /// as `--playground NAME --variant V` and [`Tx::open_playground_at`] do. Like a handler's
+    /// [`Tx::open_playground`], it applies on a frame; this one takes
     /// two that advance no time, so on return the stage is made and the steps its `'r'`
     /// trigger runs at once have run. Steps queued with [`Play::after`] run as later frames
     /// reach them. Opening the story already open makes a scene's stage again, and a story's
@@ -42,8 +43,8 @@ impl<S: 'static> Runtime<S> {
     /// story or variant, listing those it has.
     pub fn open_playground(&mut self, story: &str, variant: Option<&str>) {
         let live = self.playground.as_mut().expect(NO_PLAYGROUND);
-        let request = live.open_at(Some(story), variant).unwrap_or_else(|e| panic!("{e}"));
-        self.settle_playground(request);
+        live.open_at(Some(story), variant).unwrap_or_else(|e| panic!("{e}"));
+        self.settle_playground(Request::Open(Some(story.to_owned())));
     }
 
     /// Runs the open story's trigger on `key`, as its letter or its button in the side column
@@ -97,17 +98,6 @@ pub(crate) fn stage_element(all: &[ElementInfo], key: &str) -> Option<usize> {
 }
 
 impl<S: 'static> Live<S> {
-    /// The request that opens the playground at story `name` (else the one selected), with
-    /// `variant` picked for it.
-    pub(super) fn open_at(&mut self, name: Option<&str>, variant: Option<&str>) -> Result<Request, String> {
-        if let Some(name) = name && self.find(name).is_none() {
-            let names: Vec<_> = self.order.iter().map(|&i| self.path(i)).collect();
-            return Err(format!("no story {name:?} in the playground; it has: {}", names.join(", ")));
-        }
-        if let Some(variant) = variant { self.pick(name, variant)?; }
-        Ok(Request::Open(name.map(str::to_string)))
-    }
-
     /// The open stage's own state: a scene's, or a story's.
     fn stage_state(&self) -> Option<&dyn Any> {
         if !self.open { return None; }

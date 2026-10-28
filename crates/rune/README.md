@@ -2275,6 +2275,14 @@ App::new(spec).playground(
   Back, and `Tx::keep_playground()` runs it on demand, say from a `Playground::side_real` control
   that draws from both states. `Playground::dark(|s| ..)` makes the chrome follow the app's own
   light/dark setting. `Playground::scenes(|name| ..)` picks which scenes the list shows.
+- **Links.** `tx.open_playground_at(story, variant)` opens it on a story from the app, by path,
+  name or slug, with a variant by number or name: the same lookup as `--playground` and
+  `--variant`. Called from `App::on_open_url`, a `myapp://story/timeline-send` link opens
+  straight onto the story, at launch too, with no frame of the app first. A story it doesn't
+  have is logged and opens the list; an unknown variant is logged and ignored.
+  `rune::playground::slug("Timeline/Send")` is `"timeline-send"`: the path lowercased, each run
+  of characters that aren't letters or digits made one `-`, none at the ends. The rule won't
+  change, so a bookmarked link keeps working while the story keeps its path.
 - **Overlays.** `Story::overlay` draws an overlay's view in a dashed frame of its size, so it
   shows in the window and in headless renders.
 - **Off.** It's on in debug builds; `.enabled(bool)` overrides that and `RUNE_PLAYGROUND=0`
@@ -2302,7 +2310,7 @@ assert_eq!(rt.state.count, 0);                         // the real state, untouc
 - `App::headless_runtime(size, env)` builds the runtime a headless render would, with the
   playground attached and closed. It's there when the playground is enabled, which by default
   means debug builds, so `cargo test`.
-- `open_playground(story, variant)` takes a path or a name and a variant by number or name, and
+- `open_playground(story, variant)` takes a path, a name or a slug and a variant by number or name, and
   panics with the list when there's no such story or variant. It and `playground_trigger(key)`
   apply on two frames that advance no time, so a trigger's first step has run when they
   return. Later steps run as `rt.frame(dt)` moves the logical clock.
@@ -2328,11 +2336,11 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | collapsible groups                          | built in: click a header, or ← → ↵ on it                               |
 | a key sheet                                 | built in: the side column shows each key beside its row, and a hint    |
 | open, leave, Esc, ⌘⇧D                       | built in: ⌘⇧D, Esc, Back, and `tx.open_playground()`                   |
+| a link to a story                           | `rune::playground::slug(path)`, and `tx.open_playground_at(slug, variant)` from `App::on_open_url` |
 | a background poll                           | `Story::poll`                                                          |
 
 What it doesn't do yet, if the app's storybook relies on it: keep groups folded after the
-playground closes or show counts beside the headers, mark stories that have motion, link to a
-story by slug, give a story a scrolling page stage that bleeds to the edges, or hand the keys
+playground closes or show counts beside the headers, mark stories that have motion, give a story a scrolling page stage that bleeds to the edges, or hand the keys
 to the knobs (`Knobs::panel_key`); → moves focus into the side column's controls, but not
 further. Keep those in the app until they land here.
 
