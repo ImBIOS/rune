@@ -395,3 +395,47 @@ fn a_trailing_label_rolls_new_digits_in_their_columns() {
     assert!(s < 0.5, "the s holds still: {s} pt");
     assert!(drift(false).0 > 3.0, "without trailing they ride the slide");
 }
+
+/// A counter given its value: under reduced motion a falling number still swaps in place, and a
+/// value that turns back mid-roll retargets without a jump and settles.
+#[test]
+fn a_value_under_reduced_motion_swaps_in_place_and_a_reversal_mid_roll_retargets() {
+    fn view(s: &(f64, bool), cx: &mut Cx<(f64, bool)>) -> El {
+        cx.reduced_motion(s.1);
+        let k = Kit::neutral(true);
+        rune::row().padding(20.0).child(RollingText::new("n", format!("{}", s.0)).value(s.0).font(k.ty.mono).build(&k))
+    }
+    let glyph = |rt: &Runtime<(f64, bool)>, text: &str| {
+        rt.elements().into_iter().find(|e| !e.inert && e.text.as_deref() == Some(text) && e.key.as_deref().is_some_and(|k| k.starts_with("n."))).map(|e| (e.rect, e.target))
+    };
+
+    let mut rt = Runtime::new((9.0, true), view, (400.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.0 = 8.0);
+    for _ in 0..4 {
+        rt.frame(1.0 / 120.0);
+        let (rect, target) = glyph(&rt, "8").unwrap();
+        assert_eq!(rect[1], target[1], "no roll under reduced motion");
+    }
+
+    let mut rt = Runtime::new((8.0, false), view, (400.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.0 = 9.0);
+    for _ in 0..8 {
+        rt.frame(1.0 / 120.0);
+    }
+    rt.update(|s, _| s.0 = 8.0);
+    let mut last = glyph(&rt, "8").map(|g| g.0[1]);
+    let mut worst = 0.0f32;
+    for _ in 0..120 {
+        rt.frame(1.0 / 120.0);
+        let y = glyph(&rt, "8").map(|g| g.0[1]);
+        if let (Some(a), Some(b)) = (last, y) {
+            worst = worst.max((a - b).abs());
+        }
+        last = y;
+    }
+    let (rect, target) = glyph(&rt, "8").unwrap();
+    assert!(worst < 4.0, "the returning 8 moves smoothly: {worst} pt in a frame");
+    assert_eq!(rect, target, "and settles");
+}

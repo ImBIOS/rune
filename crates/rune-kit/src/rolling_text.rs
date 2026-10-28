@@ -35,7 +35,6 @@ struct Memory {
     clusters: Vec<(String, u64)>,
     next: u64,
     value: Option<f64>,
-    falling: bool,
     width: Option<f32>,
 }
 
@@ -100,7 +99,8 @@ impl RollingText {
     }
     /// The number the label shows (SwiftUI's `.numericText(value:)`): when it rises, new glyphs
     /// enter from [`RollingText::from`] (digits move up); when it falls, from the opposite edge.
-    /// An unchanged value keeps the last direction, so words around a number roll as it last did.
+    /// Text that changes while the value holds (a new unit or format) rolls from `from`, as a
+    /// label without a value does; so does a value that isn't finite.
     pub fn value(mut self, value: f64) -> Self {
         self.value = Some(value);
         self
@@ -188,8 +188,8 @@ struct Glyph {
 }
 
 /// Assigns each cluster of `text` a stable id: clusters matched to the previous text under `key`
-/// keep theirs, the rest get fresh ones. Also whether `value` fell since the last build that gave
-/// one (the last direction when it holds), and the label's last `width`.
+/// keep theirs, the rest get fresh ones. Also whether `value` fell below the last finite value
+/// one, and the label's last `width`.
 fn keys(key: &str, text: &str, value: Option<f64>, width: f32) -> (Vec<Glyph>, bool, Option<f32>) {
     MEMORY.with(|m| {
         let mut m = m.borrow_mut();
@@ -210,13 +210,9 @@ fn keys(key: &str, text: &str, value: Option<f64>, width: f32) -> (Vec<Glyph>, b
             glyphs.push(Glyph { cluster: (*c).to_owned(), id, entered });
         }
         mem.clusters = glyphs.iter().map(|g| (g.cluster.clone(), g.id)).collect();
-        let falling = match (mem.value, value) {
-            (Some(old), Some(new)) if new != old => new < old,
-            _ => mem.falling,
-        };
-        mem.falling = falling;
-        if value.is_some() {
-            mem.value = value;
+        let falling = matches!((mem.value, value), (Some(old), Some(new)) if new.is_finite() && new < old);
+        if let Some(v) = value.filter(|v| v.is_finite()) {
+            mem.value = Some(v);
         }
         let was = mem.width.replace(width);
         (glyphs, falling, was)
@@ -330,8 +326,10 @@ mod tests {
         assert!(!falls("9s", Some(9.0)), "the first build rolls nowhere, as counting up");
         assert!(!falls("10s", Some(10.0)), "rising");
         assert!(falls("8s", Some(8.0)), "falling");
-        assert!(falls("8 s", Some(8.0)), "a held value keeps the last direction");
-        assert!(falls("8s", None), "a build without a value keeps it too");
+        assert!(!falls("8 s", Some(8.0)), "new text with the same value rolls by the text rule");
+        assert!(!falls("8s", None), "so does a build without a value");
+        assert!(!falls("-", Some(f64::NAN)) && !falls("∞", Some(f64::NEG_INFINITY)), "no direction for NaN or infinity");
+        assert!(falls("7s", Some(7.0)), "and they don't replace the last value");
         assert!(!falls("12s", Some(12.0)), "rising again");
     }
 }
