@@ -61,3 +61,102 @@ fn a_pill_label_stays_on_one_line_and_takes_room() {
     });
     assert!(!split, "the label never splits across lines");
 }
+
+// In a running app: selection, copy, wrapping and streaming over pilled text.
+
+mod live {
+    use std::ops::Range;
+
+    use crate::el::{PillStyle, col, text};
+    use crate::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextStyle};
+
+    struct S {
+        body: String,
+        pills: Vec<Range<usize>>,
+        width: f32,
+    }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let t = text(s.body.clone()).key("t").font(TextStyle::new(14.0, 400.0).lh(20.0)).w(s.width).wrap().selectable(true);
+        col().key("root").padding(10.0).child(t.pills(s.pills.iter().map(|r| (r.clone(), PillStyle::new()))))
+    }
+
+    fn runtime(body: &str, pills: &[Range<usize>], width: f32) -> Runtime<S> {
+        let s = S { body: body.into(), pills: pills.to_vec(), width };
+        let mut rt = Runtime::new(s, view, (600.0, 400.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    }
+
+    fn rect(rt: &Runtime<S>) -> [f32; 4] {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some("t")).unwrap().rect
+    }
+
+    /// Each line's byte range in the text's layout.
+    fn lines(rt: &Runtime<S>) -> Vec<Range<usize>> {
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("t")).unwrap();
+        n.text_layout.as_ref().unwrap().lines().map(|l| l.text_range()).collect()
+    }
+
+    fn drag(rt: &mut Runtime<S>, from: (f32, f32), to: (f32, f32)) {
+        rt.pointer_down(from.0, from.1);
+        rt.pointer_move(to.0, to.1);
+        rt.pointer_up(to.0, to.1);
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn a_selection_and_copy_across_a_pill_give_its_label_text() {
+        let body = "ask @reviewer to look";
+        let mut rt = runtime(body, &[4..13], 400.0);
+        let r = rect(&rt);
+        let y = r[1] + r[3] * 0.5;
+        drag(&mut rt, (r[0] + 1.0, y), (r[0] + r[2] - 1.0, y));
+        assert_eq!(rt.selected_text().as_deref(), Some(body));
+        // The highlight follows the selected range, which covers the whole label.
+        let (_, range) = rt.text_selection().unwrap();
+        assert!(range.start <= 4 && range.end >= 13, "{range:?}");
+        rt.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } });
+        rt.frame(0.0);
+        let copied = rt.copy_request.as_ref().map(|w| w.content().text().to_owned());
+        assert_eq!(copied.as_deref(), Some(body));
+    }
+
+    #[test]
+    fn every_pill_label_stays_on_one_line() {
+        let body = "ping @recursive-self-improvement and @code-review-standards-and-spec today";
+        let at = |s: &str| body.find(s).unwrap()..body.find(s).unwrap() + s.len();
+        let pills = [at("@recursive-self-improvement"), at("@code-review-standards-and-spec")];
+        let rt = runtime(body, &pills, 170.0);
+        let ls = lines(&rt);
+        assert!(ls.len() >= 3, "narrow enough to wrap: {ls:?}");
+        for p in &pills {
+            assert!(!ls.iter().any(|l| l.start > p.start && l.start < p.end), "{p:?} splits across {ls:?}");
+        }
+    }
+
+    #[test]
+    fn pills_survive_streaming_appends_and_bad_ranges_are_ignored() {
+        let mut rt = runtime("ask @reviewer", &[4..13], 400.0);
+        let pilled = |rt: &Runtime<S>| {
+            let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("t")).unwrap();
+            n.text.as_ref().unwrap().pills.iter().map(|p| p.start..p.end).collect::<Vec<_>>()
+        };
+        let mut w = rect(&rt)[2];
+        for more in [" to", " look at", " the é diff"] {
+            rt.update(|s, _| s.body.push_str(more));
+            rt.frame(1.0 / 60.0);
+            assert_eq!(pilled(&rt), [4..13 as u32], "after {more:?}");
+            assert!(rect(&rt)[2] >= w);
+            w = rect(&rt)[2];
+        }
+        // Past the end, inside "é", or empty: skipped, and the frame still draws.
+        let e = rt.state.body.find('é').unwrap();
+        rt.update(|s, _| s.pills = vec![4..13, e + 1..e + 2, 30..400, 20..20]);
+        rt.frame(2.0 / 60.0);
+        assert_eq!(pilled(&rt), [4..13 as u32]);
+        rt.update(|s, _| s.body.truncate(8));
+        rt.frame(3.0 / 60.0);
+        assert!(pilled(&rt).is_empty(), "a range the text no longer reaches is dropped");
+    }
+}
