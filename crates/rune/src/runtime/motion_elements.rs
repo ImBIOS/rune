@@ -48,14 +48,20 @@ impl MotionElement {
 }
 
 fn text_hash(text: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    if text.is_empty() { return 0; }
     let b = text.as_bytes();
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    b.len().hash(&mut h);
-    b[..b.len().min(64)].hash(&mut h);
-    b[b.len().saturating_sub(64)..].hash(&mut h);
-    h.finish().max(1)
+    if b.is_empty() { return 0; }
+    let mut h = 0xcbf2_9ce4_8422_2325 ^ b.len() as u64;
+    let mut mix = |part: &[u8]| {
+        for w in part.chunks(8) {
+            let mut v = [0; 8];
+            v[..w.len()].copy_from_slice(w);
+            h = (h ^ u64::from_le_bytes(v)).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+        }
+    };
+    let head = b.len().min(64);
+    mix(&b[..head]);
+    mix(&b[b.len().saturating_sub(64).max(head)..]);
+    h.max(1)
 }
 
 fn intent(n: &Node) -> bool {
