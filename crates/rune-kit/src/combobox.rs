@@ -2,7 +2,7 @@
 //! @opencode/ui's use-filtered-list: looping arrows, Ctrl-N/P, composition-safe Enter,
 //! and editor modifiers left to the text field. Fuzzy scores are Rune's own ordering.
 use std::rc::Rc;
-use rune::{El, Key, TextEdit, Tx, col, icon};
+use rune::{El, Key, TextEdit, Tx, col, el, icon, row};
 use crate::{Kit, Placement, Popover, PopupItem, PopupList, Select, SelectAppearance, TextInput};
 
 #[derive(Clone, Debug)]
@@ -84,6 +84,9 @@ pub struct Combobox<S> {
     search_placeholder: String,
     empty: String,
     width: f32,
+    max_height: f32,
+    placement: Placement,
+    trigger: Option<El>,
     disabled: bool,
 }
 impl<S: 'static> Combobox<S> {
@@ -91,13 +94,22 @@ impl<S: 'static> Combobox<S> {
         access: impl for<'a> Fn(&'a mut S) -> &'a mut ComboboxState + 'static) -> Self {
         Self { key: key.into(), state: state.clone(), options: Rc::new(options.to_vec()), access: Rc::new(access),
             choose: None, current: None, placeholder: String::new(), search_placeholder: "Search".into(),
-            empty: "No results".into(), width: 280.0, disabled: false }
+            empty: "No results".into(), width: 280.0, max_height: 192.0, placement: Placement::BottomStart,
+            trigger: None, disabled: false }
     }
     pub fn current(mut self, id: Option<&str>) -> Self { self.current = id.map(str::to_owned); self }
     pub fn placeholder(mut self, text: impl Into<String>) -> Self { self.placeholder = text.into(); self }
     pub fn search_placeholder(mut self, text: impl Into<String>) -> Self { self.search_placeholder = text.into(); self }
     pub fn empty_message(mut self, text: impl Into<String>) -> Self { self.empty = text.into(); self }
+    /// The popover's width, 280 by default; the trigger keeps its own.
     pub fn width(mut self, width: f32) -> Self { self.width = width; self }
+    /// The tallest the result list grows, 192 by default. A window with less room below (or
+    /// above) the trigger shortens it further, and it scrolls.
+    pub fn max_height(mut self, height: f32) -> Self { self.max_height = height; self }
+    pub fn placement(mut self, placement: Placement) -> Self { self.placement = placement; self }
+    /// Replaces the default field trigger (the chosen label and a chevron) with any element;
+    /// pressing it opens and closes the popover.
+    pub fn trigger(mut self, trigger: El) -> Self { self.trigger = Some(trigger); self }
     pub fn disabled(mut self, disabled: bool) -> Self { self.disabled = disabled; self }
     pub fn on_choose(mut self, choose: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         self.choose = Some(Rc::new(choose)); self
@@ -108,10 +120,13 @@ impl<S: 'static> Combobox<S> {
         let current = self.current.clone();
         let key = self.key.clone();
         let open_key = key.clone();
-        let mut trigger = Select::new::<&str>(format!("{}-value", self.key), &[])
-            .current(selected.map(|o| o.label.as_str())).placeholder(self.placeholder)
-            .appearance(SelectAppearance::Field).width(self.width).disabled(self.disabled)
-            .build(k, &mut Vec::new());
+        let mut trigger = match self.trigger {
+            Some(trigger) => trigger,
+            None => Select::new::<&str>(format!("{}-value", self.key), &[])
+                .current(selected.map(|o| o.label.as_str())).placeholder(self.placeholder)
+                .appearance(SelectAppearance::Field).width(self.width).disabled(self.disabled)
+                .build(k, &mut Vec::new()),
+        };
         if !self.disabled {
             trigger = trigger.on_press_tx(move |s: &mut S, tx| {
                 let state = access(s);
@@ -123,7 +138,7 @@ impl<S: 'static> Combobox<S> {
                 if state.open && let Some(id) = &current { tx.scroll_into_view(format!("{open_key}-option-{id}")); }
             });
         }
-        let mut popover = Popover::new(&self.key).trigger(trigger).placement(Placement::BottomStart)
+        let mut popover = Popover::new(&self.key).trigger(trigger).placement(self.placement).padding(0.0)
             .open(self.state.open && !self.disabled);
         let access = self.access.clone();
         popover = popover.on_close(move |s: &mut S| access(s).close());
@@ -137,7 +152,10 @@ impl<S: 'static> Combobox<S> {
         let change_access = self.access.clone();
         let change_options = self.options.clone();
         let change_key = self.key.clone();
-        let field = TextInput::new(&self.state.search).width(None).placeholder(self.search_placeholder)
+        // The search field sits borderless over a divider: the open popover is its frame, and the
+        // caret shows its focus.
+        let field = TextInput::new(&self.state.search).plain().leading_icon(k.glyph.search).height(36.0)
+            .width(None).placeholder(self.search_placeholder)
             .animate_edit_layout()
             .on_edit(move |s: &mut S| &mut access(s).search)
             .on_change(move |s: &mut S, tx| {
@@ -189,7 +207,7 @@ impl<S: 'static> Combobox<S> {
         let active_pos = active.and_then(|orig| choices.iter().position(|&c| c == orig));
         let items: Vec<_> = choices.iter().map(|&i| {
             let option = &self.options[i];
-            PopupItem::new(&option.id, &option.label).disabled(option.disabled).trailing(
+            PopupItem::new(&option.id, &option.label).description(&option.detail).disabled(option.disabled).trailing(
                 icon(k.glyph.check_small, 14.0)
                     .color(k.c.icon_base)
                     .opacity(if self.current.as_deref() == Some(option.id.as_str()) { 1.0 } else { 0.0 }),
@@ -201,7 +219,7 @@ impl<S: 'static> Combobox<S> {
         let choose_access = self.access;
         let choose = self.choose;
         let list = PopupList::new(&self.key, "")
-            .max_height(192.0)
+            .max_height(self.max_height)
             .items(items)
             .active(active_pos)
             .empty_message(self.empty)
@@ -219,6 +237,11 @@ impl<S: 'static> Combobox<S> {
                 }
             })
             .build_list(k);
-        popover.child(col().w(self.width).gap(8.0).child(field).child(list)).build(k, layer)
+        let results = col().key("results").w_full().padding(4.0).shrink().min_h(0.0).child(list);
+        let body = col().w(self.width).shrink().min_h(0.0)
+            .child(row().key("header").w_full().px(4.0).child(field))
+            .child(el().key("divider").w_full().h(1.0).fill(k.c.border_weak))
+            .child(results);
+        popover.child(body).build(k, layer)
     }
 }

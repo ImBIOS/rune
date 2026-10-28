@@ -180,3 +180,35 @@ fn filtering_springs_the_popup_height_and_fades_rows() {
     assert!(last < open - 100.0, "it settles to the empty state: {open} → {last}");
     assert_eq!(find(&rt, "empty").unwrap().opacity, 1.0);
 }
+
+fn tall_view(s: &State, _: &mut Cx<State>) -> El {
+    let options: Vec<_> = (0..200).map(|i| ComboboxOption::new(format!("item-{i}"), format!("Model {i:03}"))).collect();
+    let mut layer = Vec::new();
+    let trigger = rune::row().key("custom").size(120.0, 28.0).child(rune::text("Pick"));
+    let body = Combobox::new("models", &s.combo, &options, |s: &mut State| &mut s.combo)
+        .trigger(trigger).max_height(2000.0).build(&Kit::neutral(true), &mut layer);
+    rune_kit::root(rune::col().pt(40.0).child(rune::row().child(body)), layer)
+}
+
+#[test]
+fn a_custom_trigger_opens_a_list_that_fits_the_window_under_a_search_header() {
+    let mut rt = Runtime::new(State::default(), tall_view, (400.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let find = |rt: &Runtime<State>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+    let trigger = find(&rt, "custom").rect;
+    rt.pointer_down(trigger[0] + 10.0, trigger[1] + 10.0);
+    rt.pointer_up(trigger[0] + 10.0, trigger[1] + 10.0);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(rt.state.combo.open && rt.state.combo.search.focused);
+    let content = find(&rt, "models-content").rect;
+    assert!(content[1] + content[3] <= 300.0, "the popup runs off the window: {content:?}");
+    let [_, header_top, _, header_height] = find(&rt, "header").rect;
+    let viewport = find(&rt, "viewport").rect;
+    assert!(viewport[1] >= header_top + header_height, "rows start under the search header");
+    assert!(viewport[3] > 100.0, "the list uses the room below: {viewport:?}");
+    key(&mut rt, Key::Up, Mods::default());
+    assert_eq!(rt.state.combo.active.as_deref(), Some("item-199"));
+    let last = find(&rt, "models-option-item-199");
+    assert!(last.visible[3] > 0.0);
+}

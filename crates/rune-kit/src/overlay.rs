@@ -135,6 +135,7 @@ pub struct Popover {
     open: bool,
     placement: Placement,
     gutter: f32,
+    padding: f32,
     close: Acts,
     dismiss: Option<El>,
 }
@@ -150,12 +151,19 @@ impl Popover {
             open: false,
             placement: Placement::Bottom,
             gutter: 4.0,
+            padding: 12.0,
             close: Acts::default(),
             dismiss: None,
         }
     }
     pub fn trigger(mut self, t: El) -> Self {
         self.trigger = Some(t);
+        self
+    }
+    /// The body's inset on every side, 12 by default; 0 lets a body draw edge to edge, such as a
+    /// search field over a divider.
+    pub fn padding(mut self, p: f32) -> Self {
+        self.padding = p;
         self
     }
     pub fn title(mut self, t: impl Into<String>) -> Self {
@@ -221,7 +229,7 @@ impl Popover {
                 row().key("description").px(12.0).child(text(d.clone()).font(k.ty.text_small).color(c.std_text)),
             );
         }
-        content = content.child(col().key("body").padding(12.0).shrink().min_h(0.0).children(self.body));
+        content = content.child(col().key("body").padding(self.padding).shrink().min_h(0.0).children(self.body));
         if let Some(s) = self.dismiss {
             layer.push(s);
         }
