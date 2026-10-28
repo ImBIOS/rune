@@ -53,13 +53,15 @@ fn a_pill_label_stays_on_one_line_and_takes_room() {
     let mut width = |e: &crate::El, w| ts.layout_for_spec(e.text.as_ref().unwrap(), 1.0, w, Alignment::Start).full_width();
     let (wide_plain, wide_pill) = (width(&plain, None), width(&pilled, None));
     assert!(wide_pill > wide_plain + 4.0, "the chip's padding takes room: {wide_plain} vs {wide_pill}");
-    // Narrow enough that plain text breaks at the label's hyphens.
-    let layout = ts.layout_for_spec(pilled.text.as_ref().unwrap(), 1.0, Some(150.0), Alignment::Start);
+    // Narrow enough that plain text breaks at the label's hyphens, wide enough for the pill.
+    let layout = ts.layout_for_spec(pilled.text.as_ref().unwrap(), 1.0, Some(210.0), Alignment::Start);
     let split = layout.lines().any(|l| {
         let r = l.text_range();
         r.start > at && r.start < end
     });
-    assert!(!split, "the label never splits across lines");
+    assert!(!split, "a label that fits a line never splits across lines");
+    let narrow = ts.layout_for_spec(pilled.text.as_ref().unwrap(), 1.0, Some(110.0), Alignment::Start);
+    assert!(narrow.width() <= 110.5, "one wider than the line wraps inside it: {}", narrow.width());
 }
 
 // In a running app: selection, copy, wrapping and streaming over pilled text.
@@ -127,9 +129,9 @@ mod live {
         let body = "ping @recursive-self-improvement and @code-review-standards-and-spec today";
         let at = |s: &str| body.find(s).unwrap()..body.find(s).unwrap() + s.len();
         let pills = [at("@recursive-self-improvement"), at("@code-review-standards-and-spec")];
-        let rt = runtime(body, &pills, 170.0);
+        let rt = runtime(body, &pills, 260.0);
         let ls = lines(&rt);
-        assert!(ls.len() >= 3, "narrow enough to wrap: {ls:?}");
+        assert!(ls.len() >= 2, "narrow enough to wrap: {ls:?}");
         for p in &pills {
             assert!(!ls.iter().any(|l| l.start > p.start && l.start < p.end), "{p:?} splits across {ls:?}");
         }

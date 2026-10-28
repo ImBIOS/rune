@@ -399,8 +399,8 @@ impl PillMetrics {
 const PILL_BOX: u64 = 1 << 62;
 
 /// The chip behind each pill in `layout` (device px, at `origin`), and each leading icon with
-/// its size in px and top-left corner. A pill whose label overflows its line draws its chip to
-/// the line's end.
+/// its size in px and top-left corner. A pill whose label wraps draws one chip per line, the
+/// first to its line's end and the rest from the line's start.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pill_chips(
     layout: &Layout<Ink>,
@@ -425,9 +425,20 @@ pub(crate) fn pill_chips(
                 _ => None,
             })
             .collect();
-        for lead in boxes.iter().filter(|b| b.id & 1 == 0) {
-            let Some(pill) = pills.get(((lead.id & !PILL_BOX) >> 1) as usize) else { continue };
-            let trail = boxes.iter().find(|b| b.id == lead.id | 1);
+        // Pills whose chip starts on this line, then those whose label wrapped onto it.
+        let mut starts: Vec<(usize, Option<&parley::PositionedInlineBox>)> =
+            boxes.iter().filter(|b| b.id & 1 == 0).map(|b| (((b.id & !PILL_BOX) >> 1) as usize, Some(b))).collect();
+        let text = line.text_range();
+        for (i, p) in pills.iter().enumerate() {
+            let inside = (p.start as usize) < text.start && text.start < p.end as usize;
+            if inside && !starts.iter().any(|s| s.0 == i) {
+                starts.push((i, None));
+            }
+        }
+        for (i, lead) in starts {
+            let Some(pill) = pills.get(i) else { continue };
+            let id = PILL_BOX | (i as u64) << 1;
+            let trail = boxes.iter().find(|b| b.id == id | 1);
             let (mut asc, mut desc, mut gr_x0, mut gr_x1) = (0.0f32, 0.0f32, f32::INFINITY, f32::NEG_INFINITY);
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(gr) = item {
@@ -442,6 +453,22 @@ pub(crate) fn pill_chips(
             }
             let margin = pm.margin * scale;
             let pad = pm.pad * scale;
+            let Some(lead) = lead else {
+                // A label carried on from the line above: its chip runs from the line's start,
+                // flush with the label (no room was made before it), to its trail, or on to the
+                // line's end if it wraps again.
+                if gr_x0 > gr_x1 {
+                    continue;
+                }
+                let x1 = trail.filter(|t| (t.x - gr_x1).abs() < 1.0).map_or(gr_x1 + pad, |t| t.x + t.width - margin);
+                let x1 = if trail.is_none() { m.inline_min_coord + m.offset + m.advance - m.hanging_advance } else { x1 };
+                let base = origin[1] + m.baseline;
+                let (top, bot) = ((base - asc - 1.0 * scale).round(), (base + desc + 1.0 * scale).round());
+                let x0 = gr_x0.min(m.inline_min_coord + m.offset);
+                let rect = [(origin[0] + x0).round(), top, (x1 - x0).max(0.0).round(), bot - top];
+                out.push(PaintedDeco::new(Deco { rect, color: pill.bg.unwrap_or(bg), radius: (5.0 * scale).min(rect[3] * 0.5) }, None, 0));
+                continue;
+            };
             let rtl_lead = gr_x0 <= gr_x1 && (lead.x - gr_x1).abs() < 1.0;
             let x0 = if gr_x0 <= gr_x1 {
                 if rtl_lead {
@@ -2124,9 +2151,10 @@ impl TextSystem {
             for (range, v) in widen {
                 b.push(StyleProperty::WordSpacing(*v), range.clone());
             }
-            // A pill's label never wraps; boxes before and after it make room for its chip.
+            // Boxes before and after a pill's label make room for its chip. The label may break
+            // like any text; `break_lines_with_blocks` moves a split pill whole to the next line
+            // and lets it wrap only when it is wider than a line, as a browser wraps a span.
             for (i, r, lead, trail) in &pills {
-                b.push(StyleProperty::TextWrapMode(parley::TextWrapMode::NoWrap), r.clone());
                 for (side, index, width) in [(0, r.start, *lead), (1, r.end, *trail)] {
                     b.push_inline_box(parley::InlineBox {
                         id: PILL_BOX | (*i as u64) << 1 | side,
@@ -2801,8 +2829,8 @@ fn collect_misplaced_pills(
             if trail.is_some_and(|t| at(t.x) + t.width <= room + 0.5) {
                 continue;
             }
-            // A chip starting a line whose label went on to the next: widen this line to hold
-            // the whole pill, which then overflows it as any word too long for a line does.
+            // A chip starting a line whose trail alone went on to the next: widen this line to
+            // hold the whole pill. A label that itself went on is wider than a line: it wraps.
             let fix = if trail.is_none() && at(lead.x) < 0.5 {
                 layout.get(li + 1).and_then(|next| {
                     let nm = next.metrics();
@@ -2810,7 +2838,8 @@ fn collect_misplaced_pills(
                         PositionedLayoutItem::InlineBox(b) if b.id == lead.id | 1 => Some(b),
                         _ => None,
                     })?;
-                    Some(m.advance + t.x - nm.inline_min_coord - nm.offset + t.width + 1.0)
+                    let x = t.x - nm.inline_min_coord - nm.offset;
+                    (x < 0.5).then(|| m.advance + x + t.width + 1.0)
                 })
             } else {
                 let mut first = k;

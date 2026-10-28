@@ -100,8 +100,8 @@ fn inline_code_and_its_padding_share_one_chip() {
     assert!(decos[0].rect[2] > alone[0].rect[2], "padding widens it");
 }
 
-/// A pill's chip has room of its own: its label never wraps inside, no other glyph or chip
-/// overlaps it at any width, its icon fits inside it, and a caret at its edge sits outside.
+/// A pill's chip has room of its own: its label never wraps inside while it fits a line, no
+/// other glyph or chip overlaps it at any such width, its icon fits inside it, and a caret at its edge sits outside.
 #[test]
 fn pill_chips_keep_room_and_never_overlap_at_wraps() {
     static DOT: Icon = Icon { name: "dot", view: 24.0, body: "<circle cx=\"12\" cy=\"12\" r=\"8\"/>" };
@@ -138,7 +138,7 @@ fn pill_chips_keep_room_and_never_overlap_at_wraps() {
         }
         out
     };
-    for width in (60..=420).step_by(9) {
+    for width in (123..=420).step_by(9) {
         let max = width as f32 * scale;
         let layout = text.layout_blocks(content, &[], &[], &pills, style, scale, Some(max), Alignment::Start);
         let (mut chips, mut icons) = (Vec::new(), Vec::new());
@@ -184,6 +184,33 @@ fn pill_chips_keep_room_and_never_overlap_at_wraps() {
                     assert!(outside, "caret at {at} ({x}) inside chip {:?} at width {width}", c.rect);
                 }
             }
+        }
+    }
+}
+
+/// A pill wider than its line wraps like the text it labels (as a browser wraps a span) instead
+/// of running past the line: one chip per line, each inside the line, over its part of the label.
+#[test]
+fn a_pill_wider_than_its_line_wraps_inside_it() {
+    let mut text = TextSystem::default();
+    let style = TextStyle::new(14.0, 400.0);
+    let label = "@Migrate config loader to the new schema";
+    let content = format!("as in {label} did");
+    let start = content.find(label).unwrap() as u32;
+    let pills = [PillChip { start, end: start + label.len() as u32, icon: None, bg: None, fg: None }];
+    let scale = 2.0;
+    for width in (90..=200).step_by(7) {
+        let max = width as f32 * scale;
+        let layout = text.layout_blocks(&content, &[], &[], &pills, style, scale, Some(max), Alignment::Start);
+        let (mut chips, mut icons) = (Vec::new(), Vec::new());
+        pill_chips(&layout, &pills, 14.0, scale, [0.0, 0.0], Color::BLACK, &mut chips, &mut icons);
+        let rows: Vec<_> = layout.lines().filter(|l| { let r = l.text_range(); r.start < pills[0].end as usize && (pills[0].start as usize) < r.end }).collect();
+        assert!(rows.len() >= 2, "the label wraps at width {width}");
+        assert_eq!(chips.len(), rows.len(), "one chip per line at width {width}");
+        assert!(layout.width() <= max + 0.5, "the text stays inside {max} at width {width}: {}", layout.width());
+        for c in &chips {
+            let r = c.deco.rect;
+            assert!(r[0] >= -0.5 && r[0] + r[2] <= max + 0.5, "chip {r:?} inside {max} at width {width}");
         }
     }
 }
