@@ -142,6 +142,10 @@ name = "launcher_wakes"
 harness = false
 
 [[test]]
+name = "macos_window_corners"
+harness = false
+
+[[test]]
 name = "secondary_window"
 harness = false
 

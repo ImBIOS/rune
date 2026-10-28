@@ -273,6 +273,8 @@ impl<S: 'static> Host<S> {
         l.materials.present(&rt.materials, rt.env.scale, || gpu.queue.present(frame));
         #[cfg(not(target_os = "macos"))]
         gpu.queue.present(frame);
+        #[cfg(target_os = "macos")]
+        if let Some(shadow) = &l.shadow { shadow.presented(); }
         // The frame landed with this present; later ones needn't wait for a transaction.
         #[cfg(target_os = "macos")]
         if self.frame_anim.is_none() { l.present_with_transaction(false); }

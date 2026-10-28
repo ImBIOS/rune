@@ -1482,6 +1482,14 @@ Windows share one GPU device, with independent renderers and text atlases.
 click-through presentation at that display's physical origin and size. Options
 also support initially hidden windows and per-window minimum sizes.
 
+On macOS, `WindowOptions { transparent: true, borderless: true, .. }.macos(MacWindowOptions::default().corner_radius(16.0))`
+rounds a window or nonactivating panel with a continuous curve (`.corner_curve_circular()` for
+a circular arc). The window's layer clips everything in it, so the root view needn't clip to
+the radius; a border inside the edge is still the app's. The system shadow follows the rounded
+shape: any transparent window with `hasShadow` asks AppKit to re-sample its shadow once its
+first frame after each show, resize or scale change (or a launcher's prewarm) reaches the screen.
+Opaque or bordered windows ignore the radius.
+
 `WindowSpec::on_created` receives a weak `WindowHandle`: toggle click-through,
 visibility and topmost status, close a window, borrow its raw-window-handle, or
 read its macOS `window_number()` (CGWindowID) for ScreenCaptureKit exclusion.

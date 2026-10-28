@@ -2104,6 +2104,8 @@ impl<S: 'static> Host<S> {
         surface.configure(&gpu.device, &config);
         #[cfg(target_os = "macos")]
         crate::macos::pin_contents_top_left(&surface);
+        #[cfg(target_os = "macos")]
+        crate::macos_window_shape::apply_corners(&window, &self.macos_window, self.options.transparent, self.options.borderless);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
         // still composites premultiplied pixels. Other backends follow wgpu's straight-alpha contract.
         let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied
@@ -2127,7 +2129,15 @@ impl<S: 'static> Host<S> {
         *self.native_handle.native.window.lock().unwrap() = Arc::downgrade(&window);
         self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
         #[cfg(target_os = "macos")]
-        let present = self.present_log.clone().and_then(|log| crate::present_time::metal::LayerHook::attach(&surface, log));
+        let resamples = crate::macos_window_shape::resamples(&window, self.options.transparent);
+        #[cfg(target_os = "macos")]
+        let hook_log = self.present_log.clone()
+            .or_else(|| resamples.then(|| Arc::new(crate::present_time::metal::Log::untraced())));
+        #[cfg(target_os = "macos")]
+        let present = hook_log.clone().and_then(|log| crate::present_time::metal::LayerHook::attach(&surface, log));
+        #[cfg(target_os = "macos")]
+        let shadow = hook_log.filter(|_| resamples && present.is_some())
+            .and_then(|log| crate::macos_window_shape::Shadow::new(&window, log, visible || launcher));
         #[cfg(target_os = "macos")]
         if self.present_log.is_some() && present.is_none() { eprintln!("rune: trace: this surface reports no present times"); }
         #[cfg(target_os = "macos")]
@@ -2144,6 +2154,8 @@ impl<S: 'static> Host<S> {
             activator: None,
             #[cfg(target_os = "macos")]
             present,
+            #[cfg(target_os = "macos")]
+            shadow,
             surface,
             config,
             #[cfg(target_os = "macos")]
@@ -2290,6 +2302,8 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        #[cfg(target_os = "macos")]
+        if let Some(shadow) = self.win.as_ref().and_then(|w| w.shadow.as_ref()) { shadow.turn(); }
         self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::surface_stats::slept(cause));
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
             if until <= Instant::now() {
@@ -2650,6 +2664,8 @@ impl<S: 'static> Host<S> {
                 l.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                #[cfg(target_os = "macos")]
+                if let Some(shadow) = &l.shadow { shadow.redraw(); }
                 let scale = scale_factor as f32;
                 let size = l.window.inner_size();
                 if size.width > 0 && size.height > 0 {

@@ -18,7 +18,8 @@ fn window_panel_builders_preserve_exhaustive_literals_and_default_inference() {
     // Existing WindowSpec literals remain exhaustive too.
     let window = WindowSpec { key: "quick".into(), app, options, on_created: None }
         .on_focus(|_, _, _| {}).options(Default::default());
-    let _ = window.configured_options(WindowOptions::default().macos(MacWindowOptions::default().nonactivating_panel(true)));
+    let _ = window.configured_options(WindowOptions::default().macos(MacWindowOptions::default().nonactivating_panel(true)
+        .corner_radius(16.0).corner_curve_circular()));
     handle.place(DisplayTarget::Primary, OverlayPlacement::FullScreen);
     let overlay = OverlaySpec { name: "compat", size: (50.0, 50.0), edge: ScreenEdge::Top,
         margin: 0.0, align: Align::Center, inset: 0.0, interactive: true, view };

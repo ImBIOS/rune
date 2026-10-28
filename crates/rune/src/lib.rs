@@ -89,6 +89,8 @@ mod display_link;
 #[cfg(target_os = "macos")]
 mod macos_help;
 #[cfg(target_os = "macos")]
+mod macos_window_shape;
+#[cfg(target_os = "macos")]
 mod fn_key;
 pub mod color;
 pub mod compose;

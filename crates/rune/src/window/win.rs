@@ -9,9 +9,12 @@ pub(super) struct Win {
     pub(super) pacing: Option<crate::display_link::DisplayLink>,
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(super) activator: Option<crate::activation::Activator>,
-    /// Reports when each drawable reached the screen while tracing.
+    /// Reports when each drawable reached the screen, while tracing or for `shadow`.
     #[cfg(target_os = "macos")]
     pub(super) present: Option<crate::present_time::metal::LayerHook>,
+    /// Re-samples a transparent window's system shadow once its new pixels land.
+    #[cfg(target_os = "macos")]
+    pub(super) shadow: Option<crate::macos_window_shape::Shadow>,
     pub(super) surface: wgpu::Surface<'static>,
     pub(super) config: wgpu::SurfaceConfiguration,
     #[cfg(target_os = "macos")]
@@ -63,6 +66,8 @@ impl Win {
         self.config.height = height;
         self.surface.configure(device, &self.config);
         if let Some(alpha) = &mut self.alpha { alpha.resize(device, (width, height)); }
+        #[cfg(target_os = "macos")]
+        if let Some(shadow) = &self.shadow { shadow.redraw(); }
         true
     }
 }
@@ -194,6 +199,7 @@ impl Win {
     pub(super) fn show(&self, focus: bool) {
         #[cfg(target_os = "macos")]
         {
+            if let Some(shadow) = &self.shadow { shadow.shown(); }
             if let Some(panel) = &self.panel {
                 panel.show(std::time::Duration::ZERO);
                 if focus { panel.request_keys(); }
@@ -208,6 +214,8 @@ impl Win {
     pub(super) fn hide(&self) {
         #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
         crate::file_dialog::window_focus(&self.window, false);
+        #[cfg(target_os = "macos")]
+        if let Some(shadow) = &self.shadow { shadow.hidden(); }
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel { panel.hide(std::time::Duration::ZERO); return; }
         self.window.set_visible(false);

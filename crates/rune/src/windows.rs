@@ -166,6 +166,8 @@ pub struct MacWindowOptions {
     pub(crate) exclude_from_capture: Option<bool>,
     pub(crate) nonactivating_panel: bool,
     pub(crate) launcher: bool,
+    pub(crate) corner_radius: Option<f32>,
+    pub(crate) corner_curve_circular: bool,
 }
 
 impl MacWindowOptions {
@@ -183,6 +185,15 @@ impl MacWindowOptions {
     /// Requests NSWindowSharingNone; capture clients should also filter window_number().
     /// false restores NSWindowSharingReadOnly. This is not a capture guarantee.
     pub fn exclude_from_capture(mut self, exclude: bool) -> Self { self.exclude_from_capture = Some(exclude); self }
+    /// Rounds a transparent, borderless window or panel to `radius` points with a continuous
+    /// (squircle) curve. The window's root layer clips everything it shows, Rune's drawing and
+    /// native material views alike, so the root view needn't clip itself to the radius. A
+    /// border drawn inside the edge is still the app's. The system shadow, when on, follows
+    /// the rounded shape. Ignored for opaque or bordered windows, where AppKit owns the frame,
+    /// and on other platforms.
+    pub fn corner_radius(mut self, radius: f32) -> Self { self.corner_radius = Some(radius.max(0.0)); self }
+    /// Use a circular corner arc instead of the continuous curve for `corner_radius`.
+    pub fn corner_curve_circular(mut self) -> Self { self.corner_curve_circular = true; self }
 }
 
 /// Ordinary options plus native builders, accepted by WindowSpec::configured_options.

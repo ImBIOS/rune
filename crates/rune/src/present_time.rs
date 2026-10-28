@@ -214,8 +214,9 @@ pub(crate) mod metal {
     //! Present times from a CAMetalLayer. wgpu acquires and presents the drawable itself and
     //! exposes neither, so the traced window's layer becomes an instance of a subclass of its
     //! own class whose `nextDrawable` adds a Metal presented handler to each drawable it
-    //! returns. Only that layer changes, only while tracing, and it gets its class back when
-    //! the hook drops.
+    //! returns. Only that layer changes, only while tracing or while a transparent window with
+    //! a shadow needs to know when its frames land (`macos_window_shape`), and it gets its
+    //! class back when the hook drops.
 
     use super::{Presented, Source};
     use objc2_metal::MTLDrawable;
@@ -223,7 +224,7 @@ pub(crate) mod metal {
     use objc2_video::runtime::{AnyClass, AnyObject, ClassBuilder, ProtocolObject, Sel};
     use objc2_video::{msg_send, sel};
     use std::ptr::NonNull;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::ffi::CString;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -231,20 +232,49 @@ pub(crate) mod metal {
     #[link(name = "QuartzCore", kind = "framework")]
     unsafe extern "C" { fn CACurrentMediaTime() -> f64; }
 
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRunLoopGetMain() -> *mut std::ffi::c_void;
+        fn CFRunLoopWakeUp(run_loop: *mut std::ffi::c_void);
+    }
+
+    /// Wakes the main run loop for another turn. Callable from any thread.
+    pub(crate) fn wake_main() {
+        // SAFETY: CFRunLoopWakeUp is thread-safe; the main run loop lives as long as the process.
+        unsafe { CFRunLoopWakeUp(CFRunLoopGetMain()) }
+    }
+
     /// Drawables acquired and presented on a hooked layer.
     #[derive(Default)]
     pub(crate) struct Log {
         next: AtomicU64,
         acquired: AtomicU64,
-        /// `(seq, presentedTime)`: host seconds, 0 for a skipped drawable.
+        /// `(seq, presentedTime)`: host seconds, 0 for a skipped drawable. Kept only while tracing.
         presented: Mutex<Vec<(u64, f64)>>,
+        untraced: bool,
+        /// The newest drawable that reached the screen.
+        on_screen: AtomicU64,
+        /// Wake the main run loop when a drawable reaches the screen.
+        watch: AtomicBool,
     }
 
     impl Log {
+        /// A log that only tracks which drawable is on screen, for a window that isn't traced.
+        pub(crate) fn untraced() -> Self { Log { untraced: true, ..Default::default() } }
+
         /// The drawable the last `nextDrawable` returned, once.
         pub(crate) fn acquired(&self) -> Option<u64> {
             Some(self.acquired.swap(0, Ordering::AcqRel)).filter(|seq| *seq != 0)
         }
+
+        /// The drawable the last `nextDrawable` returned (0 before the first).
+        pub(crate) fn last_acquired(&self) -> u64 { self.next.load(Ordering::Acquire) }
+
+        /// The newest drawable Metal reported on screen (0 before the first).
+        pub(crate) fn on_screen(&self) -> u64 { self.on_screen.load(Ordering::Acquire) }
+
+        /// While on, each drawable that reaches the screen wakes the main run loop.
+        pub(crate) fn watch(&self, on: bool) { self.watch.store(on, Ordering::Release); }
     }
 
     impl Source for Log {
@@ -285,7 +315,11 @@ pub(crate) mod metal {
             let handler = block2_metal::RcBlock::new(move |d: NonNull<ProtocolObject<dyn MTLDrawable>>| {
                 // SAFETY: Metal passes the presented drawable for the handler's duration.
                 let at = unsafe { d.as_ref() }.presentedTime();
-                log.presented.lock().unwrap().push((seq, at));
+                if !log.untraced { log.presented.lock().unwrap().push((seq, at)); }
+                if at > 0.0 {
+                    log.on_screen.fetch_max(seq, Ordering::AcqRel);
+                    if log.watch.load(Ordering::Acquire) { wake_main(); }
+                }
             });
             // SAFETY: nextDrawable returns a CAMetalDrawable, which conforms to MTLDrawable;
             // Metal copies the block.
