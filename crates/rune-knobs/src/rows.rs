@@ -281,6 +281,16 @@ fn choice_row<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
             .radius(5.0)
             .fill(if on { st.raised } else { Color::TRANSPARENT })
             .hover(st.fill_hover)
+            .on_hover_change(move |s: &mut S, inside, tx: &mut Tx| {
+                tx.instant();
+                let k = lens(s);
+                if inside {
+                    k.hot = Some(d.name.to_owned());
+                    k.hot_opt = Some((d.name.to_owned(), j));
+                } else if k.hot_opt.as_ref().is_some_and(|(n, o)| *n == d.name && *o == j) {
+                    k.hot_opt = None;
+                }
+            })
             .on_press_tx(move |s: &mut S, tx: &mut Tx| {
                 tx.instant();
                 let k = lens(s);

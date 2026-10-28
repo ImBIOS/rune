@@ -79,11 +79,50 @@ pub struct Knob {
     pub labels: &'static [&'static str],
     /// One plain line on what it changes, shown while it's hovered or the keyboard is on it.
     pub about: &'static str,
+    /// One short line per option of a choice, shown while that option is hovered or picked.
+    pub hints: &'static [&'static str],
+}
+
+/// What an app says about a knob from one table instead of on the knob: a plainer name, one
+/// line on what it changes, and a line per option, keyed by the option's label so a reordered
+/// knob keeps them right. Hand the table to [`describe`]; a note wins over the knob's own label,
+/// about and hints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Note {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub about: &'static str,
+    pub hints: &'static [(&'static str, &'static str)],
+}
+
+impl Note {
+    pub const fn new(name: &'static str, about: &'static str) -> Self {
+        Self { name, label: "", about, hints: &[] }
+    }
+    pub const fn label(mut self, label: &'static str) -> Self {
+        self.label = label;
+        self
+    }
+    pub const fn hints(mut self, hints: &'static [(&'static str, &'static str)]) -> Self {
+        self.hints = hints;
+        self
+    }
+}
+
+static NOTES: std::sync::OnceLock<&'static [Note]> = std::sync::OnceLock::new();
+
+/// Sets the app's notes on its knobs, once; later calls are ignored.
+pub fn describe(notes: &'static [Note]) {
+    let _ = NOTES.set(notes);
+}
+
+fn note(name: &str) -> Option<&'static Note> {
+    NOTES.get()?.iter().find(|n| n.name == name)
 }
 
 impl Knob {
     pub const fn new(name: &'static str, min: f32, max: f32, default: f32) -> Self {
-        Self { name, label: "", min, max, default, step: 0.0, labels: &[], about: "" }
+        Self { name, label: "", min, max, default, step: 0.0, labels: &[], about: "", hints: &[] }
     }
     /// Shows the knob as `label` and keeps storing it under its name.
     pub const fn label(mut self, label: &'static str) -> Self {
@@ -95,9 +134,28 @@ impl Knob {
         self.about = about;
         self
     }
+    /// One line per option, in order.
+    pub const fn hints(mut self, hints: &'static [&'static str]) -> Self {
+        self.hints = hints;
+        self
+    }
     /// What the panel calls it.
     pub fn title(&self) -> &'static str {
-        if self.label.is_empty() { self.name } else { self.label }
+        match note(self.name) {
+            Some(n) if !n.label.is_empty() => n.label,
+            _ if self.label.is_empty() => self.name,
+            _ => self.label,
+        }
+    }
+    /// The line on what it changes: its note's, or its own.
+    pub fn describe(&self) -> &'static str {
+        note(self.name).map(|n| n.about).filter(|a| !a.is_empty()).unwrap_or(self.about)
+    }
+    /// The line on option `i` of a choice, or "" when there isn't one.
+    pub fn hint(&self, i: usize) -> &'static str {
+        let own = self.hints.get(i).copied().unwrap_or("");
+        let label = self.labels.get(i).copied().unwrap_or("");
+        note(self.name).and_then(|n| n.hints.iter().find(|(l, _)| *l == label)).map(|(_, h)| *h).filter(|h| !h.is_empty()).unwrap_or(own)
     }
     pub const fn step(mut self, step: f32) -> Self {
         self.step = step;
@@ -105,7 +163,7 @@ impl Knob {
     }
     /// One of `labels`, stored as its index.
     pub const fn choice(name: &'static str, labels: &'static [&'static str], default: usize) -> Self {
-        Self { name, label: "", min: 0.0, max: (labels.len().saturating_sub(1)) as f32, default: default as f32, step: 1.0, labels, about: "" }
+        Self { name, label: "", min: 0.0, max: (labels.len().saturating_sub(1)) as f32, default: default as f32, step: 1.0, labels, about: "", hints: &[] }
     }
     fn clamp(&self, v: f32) -> f32 {
         let v = v.clamp(self.min, self.max);
@@ -200,6 +258,8 @@ pub struct Knobs {
     kbd: bool,
     /// The slider under the pointer, and the one being dragged.
     hot: Option<String>,
+    /// The option of a choice under the pointer: its knob and index.
+    hot_opt: Option<(String, usize)>,
     drag: Option<String>,
     /// The preset each group last applied.
     active: BTreeMap<String, String>,
@@ -283,12 +343,18 @@ impl Knobs {
         }
         self.group.as_deref().and_then(|n| groups.iter().find(|g| g.name == n)).or(groups.first()).copied()
     }
+    /// Puts the pointer over knob `name` (and option `option` of a choice), for a still or a test.
+    pub fn hover(&mut self, name: &str, option: Option<usize>) {
+        self.hot = Some(name.to_owned());
+        self.hot_opt = option.map(|j| (name.to_owned(), j));
+    }
     pub fn close(&mut self) {
         self.open = false;
         self.picking = false;
         self.hover = None;
         self.kbd = false;
         self.hot = None;
+        self.hot_opt = None;
         self.drag = None;
     }
     pub fn toggle(&mut self) {

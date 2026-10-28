@@ -172,13 +172,23 @@ fn described<'a>(k: &Knobs, groups: &'a [Group]) -> Option<&'a Knob> {
     }
 }
 
-/// The line under the list: what the knob in hand does, or the keys.
+/// The line under the list: what the knob in hand does, and the option under the pointer
+/// (or the one picked), or the keys.
 fn about(k: &Knobs, groups: &[Group], st: Style) -> El {
-    let c = col().key("knobs-about").w_full().h(56.0).px(INSET + PAD).pt(8.0).gap(2.0);
+    let c = col().key("knobs-about").w_full().h(64.0).px(INSET + PAD).pt(8.0).gap(2.0);
     match described(k, groups) {
         Some(d) => {
             let c = c.child(text(d.title()).font(ABOUT_TITLE).color(st.fg2).truncate_fade());
-            if d.about.is_empty() { c } else { c.child(text(d.about).font(ABOUT).color(st.fg3).wrap()) }
+            let c = if d.describe().is_empty() { c } else { c.child(text(d.describe()).key("knobs-about-line").font(ABOUT).color(st.fg3).wrap()) };
+            let opt = match &k.hot_opt {
+                Some((n, j)) if *n == d.name => Some(*j),
+                _ if !d.labels.is_empty() => Some(k.get(d).round() as usize),
+                _ => None,
+            };
+            match opt.and_then(|j| Some((d.labels.get(j)?, d.hint(j)))) {
+                Some((label, hint)) if !hint.is_empty() => c.child(text(format!("{label}: {hint}")).key("knobs-about-option").font(ABOUT).color(st.fg2).truncate_fade()),
+                _ => c,
+            }
         }
         None => c.child(text("↑↓ move   ←→ fold, open or change   type to filter").font(ABOUT).color(st.fg3).wrap()),
     }

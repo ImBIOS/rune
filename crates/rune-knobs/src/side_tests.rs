@@ -8,7 +8,7 @@ struct T {
     knobs: Knobs,
 }
 const L: Knob = Knob::new("Left size", 0.0, 10.0, 5.0).label("Left column size");
-const C: Knob = Knob::choice("Style", &["One", "Two", "Three"], 0);
+const C: Knob = Knob::choice("Style", &["One", "Two", "Three"], 0).hints(&["The first", "The second", ""]);
 const R: Knob = Knob::new("Right pad", 0.0, 40.0, 20.0);
 const GROUPS: &[Group] = &[Group::new("Left", "left", &[L, C]), Group::new("Right", "right", &[R])];
 
@@ -151,4 +151,20 @@ fn folding_rolls_the_rows_up_on_the_fold_spring() {
     assert!(mid > 1.0 && mid < open - 1.0, "partway: {mid} of {open}");
     settle(&mut rt);
     assert!(seen(&rt) < 0.5);
+}
+
+#[test]
+fn hovering_an_option_says_what_it_does_under_the_list() {
+    let mut s = T { knobs: Knobs::default() };
+    s.knobs.show();
+    s.knobs.set_folded("Left", false);
+    let mut rt = Runtime::new(s, view, (1000.0, 700.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    assert!(rt.find("knobs-about-option").is_none(), "nothing in hand, so the keys show");
+    let (x, y) = rt.find("opt-1").expect("Style's second option");
+    rt.pointer_move(x, y);
+    settle(&mut rt);
+    assert!(rt.find("knobs-about-option").is_some(), "the hovered option's line shows");
+    assert_eq!(C.hint(1), "The second");
+    assert_eq!(C.hint(2), "", "an option without a line says nothing");
 }

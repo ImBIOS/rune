@@ -92,7 +92,7 @@ fn pages(groups: &[Group]) -> Vec<&'static str> {
 /// Knob `i` of `g` matches every word of `q` across its page, group, title and description.
 fn matches(g: &Group, i: usize, words: &[String]) -> bool {
     let d = &g.knobs[i];
-    let hay = format!("{} {} {} {} {}", g.under, g.name, d.title(), d.name, d.about).to_lowercase();
+    let hay = format!("{} {} {} {} {}", g.under, g.name, d.title(), d.name, d.describe()).to_lowercase();
     words.iter().all(|w| hay.contains(w.as_str()))
 }
 
