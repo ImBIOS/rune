@@ -1,0 +1,9 @@
+{
+ "events": [
+  {"t": 0.3, "type": "tap", "key": "up", "expect": "smooth", "element": "secs.3"},
+  {"t": 1.1, "type": "tap", "key": "down", "expect": "smooth", "element": "secs.5"},
+  {"t": 1.9, "type": "tap", "key": "up"},
+  {"t": 1.98, "type": "tap", "key": "down", "expect": "smooth", "element": "secs.8"},
+  {"t": 2.8, "type": "tap", "key": "down", "expect": "smooth", "element": "count.8"}
+ ]
+}

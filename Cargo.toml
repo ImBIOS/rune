@@ -36,6 +36,7 @@ members = [
     "examples/glass-card",
     "examples/glass-panel",
     "examples/frosted-bar",
+    "examples/odometer",
 ]
 exclude = ["tools/rune-dev-guard"]
 
