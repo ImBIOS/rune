@@ -23,8 +23,20 @@ impl Drop for Source {
     fn drop(&mut self) { unsafe { CFRelease(self.0) }; }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCED: std::cell::Cell<Option<fn(u32, u32) -> Option<String>>> = const { std::cell::Cell::new(None) };
+}
+/// Tests: translate labels on this thread with `layout` (Carbon key, modifiers) instead of
+/// the current input source, or stop with `None`.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn force(layout: Option<fn(u32, u32) -> Option<String>>) { FORCED.with(|forced| forced.set(layout)); }
+
 /// The label for `key` pressed with Carbon `modifiers` (`cmdKey`, `shiftKey`, ...).
 pub(super) fn label(key: u32, modifiers: u32) -> Option<String> {
+    #[cfg(test)]
+    if let Some(layout) = FORCED.with(std::cell::Cell::get) { return layout(key, modifiers); }
     // AppKit also calls TIS. A private mutex cannot serialize with it; stay on the
     // UI thread. Background/headless callers get the documented US fallback.
     if unsafe { pthread_main_np() } == 0 { return None; }

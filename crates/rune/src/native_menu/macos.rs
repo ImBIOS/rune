@@ -4,7 +4,7 @@ use super::{Description, Location, MenuError};
 use std::{cell::{Cell, RefCell}, ffi::{c_char, c_void}, sync::Arc};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability, sel, rc::Retained,
     runtime::{AnyClass, AnyObject, Bool, Sel}};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 
 type Sink = Arc<dyn Fn(&str) + Send + Sync>;
@@ -105,7 +105,7 @@ impl Native {
             item.setTarget(Some(&target));
             item.setEnabled(d.enabled);
             item.setState(if d.checked { 1 } else { 0 });
-            set_key_equivalent(&item, d.equivalent.as_ref());
+            super::set_key_equivalent(&item, d.equivalent.as_ref());
             (d.location.clone(), item, target)
         }).collect();
         self.clear();
@@ -151,33 +151,4 @@ impl Drop for Native {
         self.clear();
         OWNED.with(|owned| owned.set(false));
     }
-}
-
-/// Shows `shortcut` beside the item, or nothing.
-pub(crate) fn set_key_equivalent(item: &NSMenuItem, shortcut: Option<&crate::Shortcut>) {
-    let key = shortcut.map(key_equivalent).unwrap_or_default();
-    let mods = shortcut.map(crate::Shortcut::modifiers).unwrap_or_default();
-    let mut flags = NSEventModifierFlags::empty();
-    if mods.ctrl { flags |= NSEventModifierFlags::NSEventModifierFlagControl; }
-    if mods.alt { flags |= NSEventModifierFlags::NSEventModifierFlagOption; }
-    if mods.shift { flags |= NSEventModifierFlags::NSEventModifierFlagShift; }
-    if mods.logo { flags |= NSEventModifierFlags::NSEventModifierFlagCommand; }
-    // SAFETY: a main-thread item; both setters copy their values.
-    unsafe {
-        item.setKeyEquivalent(&NSString::from_str(&key));
-        item.setKeyEquivalentModifierMask(flags);
-    }
-}
-
-fn key_equivalent(shortcut: &crate::Shortcut) -> String {
-    use crate::PhysicalKeyCode::*;
-    let scalar = match shortcut.physical_key() {
-        Escape => 0x1b, Enter => 0x0d, Tab => 9, Backspace => 8, Space => 32,
-        ArrowUp => 0xf700, ArrowDown => 0xf701, ArrowLeft => 0xf702, ArrowRight => 0xf703,
-        Insert => 0xf727, Delete => 0xf728, Home => 0xf729, End => 0xf72b, PageUp => 0xf72c, PageDown => 0xf72d,
-        key if (F1..=F24).contains(&key) => 0xf704 + key as u32 - F1 as u32,
-        // AppKit reads a capital as ⇧; the mask already carries it.
-        _ => return shortcut.keycaps().pop().unwrap_or_default().to_lowercase(),
-    };
-    char::from_u32(scalar).unwrap().to_string()
 }

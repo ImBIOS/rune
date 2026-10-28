@@ -72,10 +72,23 @@ impl Shortcut {
     /// name ("Space", "F5"; glyphs such as ↩ ⇥ ⎋ ⌫ on macOS). macOS translates the physical key
     /// using the current keyboard layout on the UI thread, under the chord's ⌘ and ⌃ (some
     /// layouts change while they're held); elsewhere (or when layout data is unavailable)
-    /// these are US labels. Persist Display/FromStr, not these labels.
+    /// these are US labels. Persist Display/FromStr, not these labels. A menu shows
+    /// `menu_keycaps` instead.
     pub fn keycaps(&self) -> Vec<String> {
         let mut labels = modifier_keycaps(self.modifiers());
         labels.push(self.key_label());
+        labels
+    }
+
+    /// Keycaps as a menu shows this chord: the key the accelerator names, on every layout.
+    /// "cmd+b" is ⌘B on Dvorak too, where AppKit matches the menu item by the typed "b", not
+    /// by the key in QWERTY's B position (which types "x" there). Use these for menu items
+    /// and for hints of keys an app matches by character; `keycaps` for a global shortcut,
+    /// which follows the key's position.
+    pub fn menu_keycaps(&self) -> Vec<String> {
+        let mut labels = modifier_keycaps(self.modifiers());
+        let name = self.key_name();
+        labels.push(named_label(name).unwrap_or_else(|| capital(us_label(name).into())));
         labels
     }
 

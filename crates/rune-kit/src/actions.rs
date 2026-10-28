@@ -172,10 +172,11 @@ enum Label {
     Custom(Box<dyn FnOnce(TextStyle, Color) -> El>),
 }
 
+/// An accelerator as a menu shows it, the same key on every layout; any other text as given.
 fn format_shortcut(s: &str) -> String {
     let s = s.trim();
     if let Ok(sc) = s.parse::<rune::Shortcut>() {
-        sc.keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" })
+        sc.menu_keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" })
     } else {
         s.to_owned()
     }

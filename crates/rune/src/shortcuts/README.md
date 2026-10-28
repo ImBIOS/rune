@@ -127,6 +127,9 @@ names; `keycaps()` is for display only. On the macOS main thread, printable labe
 use `TISCopyCurrentKeyboardLayoutInputSource` and `UCKeyTranslate` without changing
 the input source. Other platforms, background callers and unavailable layouts use
 US labels. Persist the canonical shortcut, not its translated keycaps.
+`menu_keycaps()` is the label a menu shows: the key the accelerator names on every
+layout (`cmd+b` is ⌘B on Dvorak, where `keycaps()` says ⌘X). Use it for menu items and
+hints of keys an app matches by character, `keycaps()` for global shortcuts.
 
 Physical input and its logical fallback are processed together in event order.
 Focused capture runs before modal Escape, text editing and paste. A consumed chord
@@ -162,8 +165,13 @@ existing named-menu items are preserved. The Dock adapter adds an absent
 `applicationDockMenu:` selector to winit's existing delegate class, retaining the
 delegate and all existing methods. An existing non-Rune selector is an error; the
 Rune hook returns nil after teardown. Key equivalents are native menu equivalents,
-not global registrations. Reapply the snapshot after changing keyboard layout to
-refresh translated equivalents.
+not global registrations. AppKit matches them by the character typed, so an item's
+equivalent is the character its accelerator names: `cmd+b` is "b" with ⌘ on every
+layout, `cmd+shift+=` is "=" with ⇧⌘, and named keys use AppKit's characters (↩ ⇥ ⎋ ⌫ ⌦,
+arrows, F-keys). App menu, named menus, Dock and context menus all show the same key.
+When two items in the menu bar share an equivalent, AppKit gives it to the first and
+the later one shows none, so one key never runs two items. Rune never sets the
+function-key flag; the 🌐F in a menu titled View is AppKit's own Enter Full Screen.
 
 An accessory app that calls `set_dock_icon(true)` gets winit's standard app menu
 if `NSApp.mainMenu` is absent: About, Services, Hide, Hide Others, Show All and Quit.

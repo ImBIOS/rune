@@ -162,6 +162,10 @@ name = "default_menu_macos"
 harness = false
 
 [[test]]
+name = "menu_key_equivalent_macos"
+harness = false
+
+[[test]]
 name = "macos_drag_out"
 harness = false
 

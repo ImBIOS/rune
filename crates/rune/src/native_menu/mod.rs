@@ -9,6 +9,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod default_macos;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod key_equivalent;
+#[cfg(test)]
+mod key_equivalent_tests;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod standard;
 #[cfg(target_os = "macos")]
 mod standard_macos;
@@ -17,7 +21,7 @@ pub(crate) use default_macos::{ensure as ensure_default_menu, promote as promote
 #[cfg(target_os = "macos")]
 pub(crate) use standard_macos::{adopt as adopt_standard_view, install as install_standard_menus, take_unhandled};
 #[cfg(target_os = "macos")]
-pub(crate) use macos::set_key_equivalent;
+pub(crate) use key_equivalent::set_key_equivalent;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Location { App, Named(String), Dock }
