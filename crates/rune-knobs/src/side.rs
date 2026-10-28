@@ -156,11 +156,15 @@ fn filter<S: 'static>(k: &Knobs, st: Style, lens: fn(&mut S) -> &mut Knobs, plan
         .fill(st.inset)
         .on_press_tx(move |s: &mut S, tx: &mut Tx| {
             tx.instant();
-            lens(s).kbd = true;
+            let k = lens(s);
+            k.kbd = true;
+            k.filtering = true;
         })
-        .child(text(if typed { k.query.clone() } else { "Type to filter".to_owned() }).font(LABEL).color(if typed { st.fg } else { st.fg3 }).truncate_fade().shrink());
-    if typed {
+        .child(text(if typed { k.query.clone() } else if k.filtering { String::new() } else { "Press / to filter".to_owned() }).font(LABEL).color(if typed { st.fg } else { st.fg3 }).truncate_fade().shrink());
+    if k.filtering {
         r = r.child(el().key("caret").w(1.5).h(14.0).fill(st.fg2));
+    }
+    if typed {
         let n: usize = plan.sections.iter().flat_map(|s| &s.subs).map(|s| s.knobs.len()).sum();
         r = r.child(spacer()).child(text(if n == 1 { "1 knob".to_owned() } else { format!("{n} knobs") }).font(VALUE).color(st.fg3));
     }
@@ -196,7 +200,7 @@ fn about(k: &Knobs, groups: &[Group], st: Style) -> El {
                 _ => c,
             }
         }
-        None => c.child(text("↑↓ move   ←→ fold, open or change   type to filter").font(ABOUT).color(st.fg3).wrap()),
+        None => c.child(text("↑↓ move   ←→ fold, open or change   1–9 pick   / filter").font(ABOUT).color(st.fg3).wrap()),
     }
 }
 

@@ -245,6 +245,8 @@ pub struct Knobs {
     pub unfolded: BTreeSet<String>,
     /// What has been typed to filter the side panel.
     pub query: String,
+    /// Typing goes into the filter: `/` (or a click on it) starts, Esc or Return stops.
+    pub filtering: bool,
     /// The page the side panel's Tabs layout shows, once one is picked.
     pub tab: Option<String>,
     /// The side panel's keyboard row.
@@ -353,6 +355,7 @@ impl Knobs {
         self.picking = false;
         self.hover = None;
         self.kbd = false;
+        self.filtering = false;
         self.hot = None;
         self.hot_opt = None;
         self.drag = None;

@@ -92,8 +92,12 @@ fn tabs_layout_opens_on_the_page_thats_showing() {
 }
 
 #[test]
-fn typing_filters_by_name_and_description() {
+fn slash_then_typing_filters_by_name_and_description() {
     let mut k = Knobs::default();
+    assert_eq!(key(&mut k, Key::Text("t".into())), Did::Not, "a letter alone doesn't filter");
+    assert!(k.query.is_empty());
+    key(&mut k, Key::Text("/".into()));
+    assert!(k.filtering);
     for c in ["t", "a", "l", "l"] {
         key(&mut k, Key::Text(c.into()));
     }
@@ -102,7 +106,26 @@ fn typing_filters_by_name_and_description() {
     assert_eq!(rows(&p), vec![Node::Group(0), Node::Knob(0, 0)], "matches A's description");
     assert_eq!(k.at(), Some(Node::Knob(0, 0)), "the keyboard lands on the first match");
     key(&mut k, Key::Escape);
-    assert!(k.query.is_empty(), "Esc clears the filter first");
+    assert!(!k.filtering && k.query == "tall", "Esc stops typing and keeps the matches");
+    key(&mut k, Key::Escape);
+    assert!(k.query.is_empty(), "a second Esc clears the filter");
+}
+
+#[test]
+fn number_keys_pick_the_keyboard_choices_option() {
+    let mut k = Knobs::default();
+    k.open = true;
+    k.set_folded("Item page", false);
+    k.set_folded("Tables", false);
+    let p = plan(&k, GROUPS, seen(&[0, 3]));
+    k.set_at(Some(Node::Knob(1, 0)), GROUPS);
+    assert!(rows(&p).contains(&Node::Knob(1, 0)));
+    assert_eq!(key(&mut k, Key::Text("2".into())), Did::Now);
+    assert_eq!(k.get(&B), 1.0, "2 picks Zebra");
+    key(&mut k, Key::Text("3".into()));
+    assert_eq!(k.get(&B), 1.0, "past the last option does nothing");
+    k.undo();
+    assert_eq!(k.get(&B), 0.0, "undoable");
 }
 
 #[test]

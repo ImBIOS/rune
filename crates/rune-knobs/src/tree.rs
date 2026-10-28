@@ -208,6 +208,13 @@ impl Knobs {
         let rows = rows(plan);
         let here = self.at.and_then(|n| rows.iter().position(|r| *r == n));
         let did = match &ev.key {
+            Key::Escape if self.filtering => {
+                self.filtering = false;
+                if rows.is_empty() {
+                    self.query.clear();
+                }
+                Did::Now
+            }
             Key::Escape if !self.query.is_empty() => {
                 self.query.clear();
                 Did::Now
@@ -270,6 +277,10 @@ impl Knobs {
                     None => Did::Not,
                 }
             }
+            Key::Enter if self.filtering => {
+                self.filtering = false;
+                Did::Now
+            }
             Key::Enter => match self.at.filter(|_| here.is_some()) {
                 Some(Node::Group(g)) => {
                     let name = groups[g].name;
@@ -298,14 +309,32 @@ impl Knobs {
                 self.refilter(groups, plan);
                 Did::Now
             }
-            Key::Text(t) if (t == "[" || t == "]") && !plan.tabs.is_empty() => {
+            Key::Text(t) if !self.filtering && t == "/" => {
+                self.filtering = true;
+                Did::Now
+            }
+            // 1–9 pick the keyboard's choice's option.
+            Key::Text(t) if !self.filtering && t.len() == 1 && matches!(t.as_bytes()[0], b'1'..=b'9') => {
+                let n = (t.as_bytes()[0] - b'1') as usize;
+                match self.at.filter(|_| here.is_some()) {
+                    Some(Node::Knob(g, i)) if n < groups[g].knobs[i].labels.len() => {
+                        let d = groups[g].knobs[i];
+                        self.checkpoint();
+                        self.set(&d, n as f32);
+                        Did::Now
+                    }
+                    // Taken even so: the page's own number keys (a decision's options) wait for the panel to let go.
+                    _ => Did::Now,
+                }
+            }
+            Key::Text(t) if !self.filtering && (t == "[" || t == "]") && !plan.tabs.is_empty() => {
                 let i = plan.tab.and_then(|c| plan.tabs.iter().position(|(p, _)| *p == c)).unwrap_or(0) as i32;
                 let n = plan.tabs.len() as i32;
                 self.tab = Some(plan.tabs[(i + if t == "[" { -1 } else { 1 }).rem_euclid(n) as usize].0.to_owned());
                 self.at = None;
                 Did::Now
             }
-            Key::Text(t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) && !(self.query.is_empty() && t == " ") => {
+            Key::Text(t) if self.filtering && !t.is_empty() && t.chars().all(|c| !c.is_control()) && !(self.query.is_empty() && t == " ") => {
                 self.query.push_str(t);
                 self.refilter(groups, plan);
                 Did::Now

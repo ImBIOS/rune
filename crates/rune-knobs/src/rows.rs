@@ -13,6 +13,8 @@ pub(crate) const VALUE: TextStyle = TextStyle::new(11.5, 450.0).lh(16.0).feature
 pub(crate) const TITLE: TextStyle = TextStyle::new(13.0, 600.0).lh(18.0).tracking(-0.13);
 pub(crate) const CHIP: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0);
 const CHIP_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(16.0);
+/// The number key over each option of the keyboard's choice.
+const DIGIT: TextStyle = TextStyle::new(8.5, 600.0).lh(10.0).features("'tnum' 1");
 
 /// More options than this get a stepper, with the whole list a click away.
 const LONG: usize = 10;
@@ -289,6 +291,8 @@ fn choice_row<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
     let at = k.get(&d).round() as usize;
     let settled = k.settled.as_ref().and_then(|m| m.get(d.name)).map(|v| d.clamp(*v).round() as usize);
     let shape = shape(&d, w, settled.is_some());
+    // The keyboard's choice numbers its options for 1–9, in the chip's left padding so nothing moves.
+    let keyed = k.at() == Some(crate::tree::Node::Knob(id.g, id.i));
     let option = |j: usize, label: &'static str, cell: Option<f32>| {
         let on = j == at;
         let mut o = row()
@@ -320,7 +324,8 @@ fn choice_row<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
                 k.set(&d, j as f32);
             })
             .child(text(label).font(CHIP).color(if on { st.fg } else { st.fg2 }).truncate_fade().shrink())
-            .children((settled == Some(j)).then(|| el().key("current").w(4.0).h(4.0).radius(2.0).fill(st.fg3)));
+            .children((settled == Some(j)).then(|| el().key("current").w(4.0).h(4.0).radius(2.0).fill(st.fg3)))
+            .children((keyed && j < 9).then(|| text((j + 1).to_string()).key("digit").font(DIGIT).color(st.fg3).absolute(1.5, 1.5)));
         if let Some(cw) = cell {
             o = o.w(cw);
         }
