@@ -329,6 +329,8 @@ impl Tx {
     /// [`Self::settle`].
     /// Changed non-streaming row heights and scroll requests in this commit also land
     /// immediately, including requests made with `scroll_to` or `scroll_to_bottom`.
+    /// Motion an earlier commit started toward a place or value this commit leaves alone keeps
+    /// running too, so a quick key during a layout spring doesn't land it mid-flight.
     /// An already-running scroll glide is not settled unless this commit replaces it;
     /// use [`Tx::settle`] to land running tracks.
     pub fn instant(&mut self) {

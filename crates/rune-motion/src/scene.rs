@@ -298,6 +298,8 @@ pub struct Scene {
     travelling: Vec<u32>,
     trace: Option<MotionTrace>,
     intents: Vec<(NodeId, u32, f32)>,
+    /// `keep_flights`: landings leave motion already on its way to the same value.
+    keep: bool,
 }
 
 impl Default for Scene {
@@ -325,7 +327,28 @@ impl Scene {
             travelling: Vec::new(),
             trace: None,
             intents: Vec::new(),
+            keep: false,
         }
+    }
+
+    /// While on, landing a property ([`Scene::set`], or [`Scene::set_frame`] with
+    /// [`LayoutAnim::INSTANT`]) on the value it's already moving to leaves that motion running:
+    /// an instant change lands what it changes, not what an earlier change set going. Off, a
+    /// landing ends any motion, as settling needs.
+    pub fn keep_flights(&mut self, on: bool) {
+        self.keep = on;
+    }
+
+    /// `prop` is moving and its target is `value`, so a landing under `keep_flights` leaves it.
+    fn in_flight_to<T: Animatable>(&self, id: NodeId, prop: Prop<T>, value: T) -> bool {
+        if !self.keep || !self.store.is_animating(id, prop) {
+            return false;
+        }
+        let Some(to) = self.store.target(id, prop) else { return false };
+        let (mut a, mut b) = ([0.0; MAX_LANES], [0.0; MAX_LANES]);
+        to.write_lanes(&mut a[..T::LANES]);
+        value.write_lanes(&mut b[..T::LANES]);
+        a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-3)
     }
 
     pub fn store(&self) -> &AnimationStore {
@@ -620,6 +643,9 @@ impl Scene {
         let had_path = self.nodes[i].path.is_some();
         // An explicit landing also cancels motion toward an unchanged target. Comparing only
         // target frames here used to leave a spring running after Runtime::settle_all().
+        if anim == LayoutAnim::INSTANT && !had_path && self.in_flight_to(id, prop::FRAME, frame) {
+            return;
+        }
         if anim == LayoutAnim::INSTANT && (had_path || self.store.is_animating(id, prop::FRAME)) {
             self.end_path(i);
             self.nodes[i].frame = frame;
@@ -795,6 +821,9 @@ impl Scene {
 
     /// Sets a property immediately (direct manipulation).
     pub fn set<T: Animatable>(&mut self, id: NodeId, prop: Prop<T>, value: T) {
+        if self.in_flight_to(id, prop, value) {
+            return;
+        }
         if let Some(i) = self.slot(id) {
             self.track_set(i, prop, value);
         }

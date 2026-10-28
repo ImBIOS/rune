@@ -3760,6 +3760,7 @@ impl<S: 'static> Runtime<S> {
             measured = self.settle_layout_reads(measured, tx);
         }
         self.apply(measured, tx);
+        self.scene.keep_flights(false);
         self.memo.keep_since(self.memo_since);
         self.track_focused_rows();
         self.prune_text_selection();
@@ -3864,7 +3865,10 @@ impl<S: 'static> Runtime<S> {
             }
         }
         mark_ancestors(&nodes, &mut concealed);
-        let instant = tx.instant || first || concealed.iter().any(|&hidden| hidden);
+        let concealing = concealed.iter().any(|&hidden| hidden);
+        let instant = tx.instant || first || concealing;
+        // An instant change lands what it changes; motion an earlier change set going keeps on.
+        self.scene.keep_flights(tx.instant && !tx.settle && !first && !concealing);
         let now = self.t;
         if self.fit_height && let Some(root) = nodes.first() { self.fit_window(root.local.h, tx, first); }
 

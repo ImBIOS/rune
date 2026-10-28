@@ -345,9 +345,9 @@ fn shadow_list_length_changes_and_instant_transactions_settle_cleanly() {
     // Start springing shadow 1 and remove shadow 2 at the same time.
     rt.update(|m, _| *m = 1);
     rt.frame(1.0 / 60.0);
-    // Snap mid-spring with `tx.instant()` to the same target (`mode = 1`).
-    rt.update(|_, tx| tx.instant());
-    assert!(!rt.frame(1.0 / 60.0), "instant transaction settles in-flight shadow geometry immediately");
+    // Land mid-spring with `tx.settle()` on the same target (`mode = 1`).
+    rt.update(|_, tx| tx.settle());
+    assert!(!rt.frame(1.0 / 60.0), "settling lands in-flight shadow geometry immediately");
 
     // Re-adding a second shadow (`mode = 3`) mounts at its new geometry (y = 4, spread = 2 -> rect y = 50 + 4 - 2 = 52)
     // instead of springing from the old removed second shadow (y = 24).
