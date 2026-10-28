@@ -117,6 +117,9 @@ mod sticky;
 #[path = "runtime/anchor.rs"]
 mod anchor;
 use anchor::anchor_position;
+#[path = "runtime/motion_elements.rs"]
+mod motion_elements;
+pub use motion_elements::MotionElement;
 #[path = "runtime/live_latch.rs"]
 mod live_latch;
 #[path = "runtime/scroll_watch.rs"]
