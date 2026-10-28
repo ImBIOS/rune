@@ -7,6 +7,8 @@ use rune::{Color, El, TextStyle, Tx, col, el, row, spacer, text};
 use crate::rows::{CHIP, Ctx, PAD, VALUE, card};
 use crate::side::{INSET, section_key};
 use crate::tree::{Head, Node, Plan, Section, Sub};
+use crate::view::tool;
+use crate::icons;
 use crate::{Group, Knobs, Style};
 
 pub(crate) const PAGE_H: f32 = 34.0;
@@ -67,6 +69,7 @@ fn section<S: 'static>(cx: Ctx<'_, S>, groups: &'static [Group], s: &Section) ->
                     tx.motion(k.fold_spring());
                     k.set_folded(p, open);
                     k.at = Some(Node::Page(p));
+                    k.kbd = true;
                 })
                 .child(text(p).font(PAGE).color(if s.seen { st.fg } else { st.fg2 }).truncate_fade().shrink())
                 .children(s.seen.then(|| dot(st)))
@@ -121,14 +124,28 @@ fn group<S: 'static>(cx: Ctx<'_, S>, groups: &'static [Group], sub: &Sub, sticky
             tx.motion(k.fold_spring());
             k.set_folded(name, open);
             k.at = Some(Node::Group(gi));
+            k.kbd = true;
             if !open {
                 k.group = Some(name.to_owned());
             }
         })
+        .on_secondary_press(move |s: &mut S, _, tx: &mut Tx| {
+            tx.instant();
+            lens(s).reset(g);
+        })
         .child(text(title).font(GROUP).color(if lit { st.fg } else { st.fg2 }).truncate_fade().shrink())
         .children((sub.seen && !sub.full).then(|| dot(st)))
-        .child(spacer())
-        .child(text(sub.knobs.len().to_string()).font(VALUE).color(if open { st.fg3 } else { st.fg2 }));
+        .child(spacer());
+    // Hovered, the header offers Random and Reset for its group in place of its count.
+    let header = if k.hover.as_deref() == Some(name) {
+        header
+            .gap(2.0)
+            .pr(PAD - 6.0)
+            .child(tool(st, "random", &icons::RANDOM, "Random", true, lens, move |k, _| k.random(g)))
+            .child(tool(st, "reset", &icons::RESET, "Reset", k.can_reset(g), lens, move |k, _| k.reset(g)))
+    } else {
+        header.child(text(sub.knobs.len().to_string()).font(VALUE).color(if open { st.fg3 } else { st.fg2 }))
+    };
     let mark = match k.at() {
         Some(Node::Knob(g, i)) if k.kbd && g == gi => Some(i),
         _ => None,

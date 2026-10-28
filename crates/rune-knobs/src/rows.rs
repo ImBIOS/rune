@@ -60,9 +60,17 @@ fn touch(k: &mut Knobs, id: Id) {
     k.kbd = true;
 }
 
-/// Hovering a knob shows what it does under the side panel.
-fn hovers<S: 'static>(e: El, lens: fn(&mut S) -> &mut Knobs, name: &'static str) -> El {
-    e.on_hover_change(move |s: &mut S, inside, tx: &mut Tx| {
+/// Hovering a knob shows what it does under the side panel; right-clicking it puts it back to
+/// its default.
+fn hovers<S: 'static>(e: El, lens: fn(&mut S) -> &mut Knobs, id: Id, d: Knob) -> El {
+    let name = d.name;
+    e.on_secondary_press(move |s: &mut S, _, tx: &mut Tx| {
+        tx.instant();
+        let k = lens(s);
+        touch(k, id);
+        k.reset_knob(&d);
+    })
+    .on_hover_change(move |s: &mut S, inside, tx: &mut Tx| {
         tx.instant();
         let k = lens(s);
         if inside {
@@ -179,7 +187,7 @@ fn slider<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
     let held = k.drag.as_deref() == Some(d.name);
     let changed = (v - d.default).abs() > 1e-4;
     let tint = if held { st.slider_active } else if hot { st.slider_hover } else { st.slider };
-    hovers(el().key(format!("knobs-knob-{i}")).role("slider").label(d.title()).w_full().h(ROW).fill(if hot || held { st.fill_hover } else { Color::TRANSPARENT }), lens, d.name)
+    hovers(el().key(format!("knobs-knob-{i}")).role("slider").label(d.title()).w_full().h(ROW).fill(if hot || held { st.fill_hover } else { Color::TRANSPARENT }), lens, id, d)
         .on_drag(move |s: &mut S, g: &mut Drag, tx: &mut Tx| {
             tx.instant();
             let k = lens(s);
@@ -267,7 +275,12 @@ pub(crate) fn shape(d: &Knob, w: f32, dot: bool) -> Shape {
 }
 
 fn choice<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
-    hovers(choice_row(cx, id, d), cx.lens, d.name)
+    let lens = cx.lens;
+    // A click anywhere on the row, not only on an option, puts the keyboard on it for ←→.
+    hovers(choice_row(cx, id, d), lens, id, d).on_press_tx(move |s: &mut S, tx: &mut Tx| {
+        tx.instant();
+        touch(lens(s), id);
+    })
 }
 
 fn choice_row<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {

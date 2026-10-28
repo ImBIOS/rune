@@ -126,9 +126,15 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
             }
             true
         })
-        .on_press_tx(move |s: &mut S, tx: &mut Tx| {
-            tx.instant();
-            lens(s).kbd = true;
+        // The pointer moving takes the highlight from the keyboard's row, so only one row is lit.
+        .on_pointer_move_local(move |s: &mut S, _, tx: &mut Tx| {
+            let k = lens(s);
+            if k.kbd && k.drag.is_none() {
+                k.kbd = false;
+                tx.instant();
+            } else {
+                tx.live_only();
+            }
         })
         .child(el().key("knobs-rim").absolute(0.0, 0.0).w(0.5).h_full().fill(st.border))
         .child(top)

@@ -459,6 +459,14 @@ impl Knobs {
     }
 
     /// Back to the active preset, or, already there, to the defaults.
+    /// Puts one knob back to its default, undoably.
+    pub fn reset_knob(&mut self, d: &Knob) {
+        if self.values.contains_key(d.name) {
+            self.checkpoint();
+            self.values.remove(d.name);
+        }
+    }
+
     pub fn reset(&mut self, g: &Group) {
         let at = self.active.get(g.name).cloned();
         match at {
