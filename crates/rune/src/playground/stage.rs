@@ -69,6 +69,9 @@ pub(super) fn trigger<X>(key: char, label: &'static str, run: Step<X>) -> Trigge
     Trigger { key, label, run }
 }
 
+/// How far past the clock a step can be due and still run on this frame, in seconds.
+const DUE_SLACK: f64 = 1e-6;
+
 /// A stage's state and its triggers' queued steps.
 pub(super) struct Stage<X> {
     pub(super) state: X,
@@ -83,6 +86,9 @@ impl<X> Stage<X> {
     /// Runs the steps due by `t`, earliest first, each seeing the time it was due. Asks for a
     /// frame when the next one is due.
     pub(super) fn run(&mut self, t: f64, tx: &mut Tx) -> bool {
+        // The clock is a running sum of frame times, so a step due on a frame can sit a rounding
+        // error past it; without the slack a replay later in the clock lands a frame late.
+        let t = t + DUE_SLACK;
         let mut ran = false;
         // Bounded, in case steps keep queueing more with no delay.
         for _ in 0..64 {

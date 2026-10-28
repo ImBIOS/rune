@@ -203,6 +203,36 @@ fn a_trigger_that_clears_stops_the_loop_and_runs_only_its_own_steps() {
     assert_eq!(rt.playground_element("pulse").and_then(|e| e.text).as_deref(), Some("beats 5"));
 }
 
+#[derive(Default)]
+struct Glow {
+    lit: bool,
+}
+
+#[test]
+fn replays_land_their_steps_on_the_same_frame_every_time() {
+    let glow = Story::new("Motion/Glow", Glow::default, |g: &Glow, _: &mut Cx<Glow>| text(if g.lit { "lit" } else { "dark" }).key("glow"))
+        .trigger('r', "Glow", |g, play| {
+            g.lit = false;
+            play.after(0.4, |g, _| g.lit = true);
+        });
+    let mut rt = runtime(playground().story(glow));
+    rt.open_playground("Motion/Glow", None);
+    let dt = 1.0 / 120.0;
+    let mut frames = Vec::new();
+    for _ in 0..3 {
+        rt.playground_trigger('r');
+        let lit_on = (1..=120).find(|_| {
+            rt.frame(dt);
+            rt.playground_state::<Glow>().is_some_and(|g| g.lit)
+        });
+        frames.push(lit_on);
+        for _ in 0..(120 - lit_on.unwrap_or(120)) {
+            rt.frame(dt);
+        }
+    }
+    assert_eq!(frames, vec![Some(48); 3], "0.4 s at 120 Hz is frame 48 on every replay");
+}
+
 #[test]
 #[should_panic(expected = "no story \"Nope\" in the playground")]
 fn an_unknown_story_panics_with_the_list() {
