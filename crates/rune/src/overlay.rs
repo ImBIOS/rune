@@ -817,15 +817,13 @@ impl<T: 'static> Overlay<T> {
         let pooled = self.gpu.clone().or_else(|| self.gpu_pool.borrow().upgrade().filter(|gpu| {
             gpu.device.features().contains(features & gpu.adapter.features())
         }));
+        // A shared device that can't composite this overlay's translucent pixels gets its own.
+        let reused = pooled.and_then(|gpu| make(&gpu.instance).filter(|s| crate::translucency::serves(&gpu, s, features, true)).map(|s| (gpu, s)));
         let mut prewarmed = None;
-        let surface = match pooled {
-            Some(gpu) => {
-                let surface = make(&gpu.instance)?;
-                self.gpu = Some(gpu);
-                surface
-            }
+        let surface = match reused {
+            Some((gpu, surface)) => { self.gpu = Some(gpu); surface }
             None => {
-                let (gpu, surface, renderer) = Gpu::for_surface(features, |instance| make(instance).ok_or_else(String::new)).ok()?;
+                let (gpu, surface, renderer) = Gpu::for_surface(features, true, |instance| make(instance).ok_or_else(String::new)).ok()?;
                 prewarmed = renderer;
                 let gpu = Arc::new(gpu);
                 *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
@@ -836,7 +834,7 @@ impl<T: 'static> Overlay<T> {
         let gpu = self.gpu.clone()?;
         let (w, h) = ((self.at.size.0 * scale).round() as u32, (self.at.size.1 * scale).round() as u32);
         let (mut config, translucent) = crate::window::surface_config(&surface, &gpu.adapter, (w, h), self.rt.srgb_blend())?;
-        config.alpha_mode = translucent.unwrap_or(config.alpha_mode);
+        if let Some(mode) = translucent { config.alpha_mode = mode } else { eprintln!("transparency unavailable for overlay {}; drawing it opaque", self.name) }
         surface.configure(&gpu.device, &config);
         #[cfg(target_os = "macos")]
         crate::macos::pin_contents_top_left(&surface);

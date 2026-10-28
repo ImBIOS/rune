@@ -1389,9 +1389,7 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     config.usage |= caps.usages & wgpu::TextureUsages::COPY_SRC;
     config.present_mode = wgpu::PresentMode::AutoVsync;
     config.desired_maximum_frame_latency = 2;
-    let translucent = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
-        .into_iter().find(|mode| caps.alpha_modes.contains(mode));
-    Some((config, translucent))
+    Some((config, crate::translucency::mode(surface, adapter)))
 }
 
 /// Follows a blend switch (`Tx::set_srgb_blend`) on a configured surface: reconfigures it for
@@ -2357,14 +2355,16 @@ impl<S: 'static> Host<S> {
             }
             None => {
                 let features = self.comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
-                let cached = self.gpu_pool.borrow().upgrade().filter(|gpu| {
-                    gpu.device.features().contains(features & gpu.adapter.features())
+                let transparent = self.options.transparent;
+                // A shared device that can't composite this window's translucent pixels gets its own.
+                let cached = self.gpu_pool.borrow().upgrade().and_then(|gpu| {
+                    let surface = gpu.instance.create_surface(window.clone()).ok()?;
+                    crate::translucency::serves(&gpu, &surface, features, transparent).then_some((gpu, surface))
                 });
-                let (gpu, surface) = if let Some(gpu) = cached {
-                    let surface = gpu.instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
-                    (gpu, surface)
+                let (gpu, surface) = if let Some(cached) = cached {
+                    cached
                 } else {
-                    let (gpu, surface, renderer) = Gpu::for_surface(features, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()))?;
+                    let (gpu, surface, renderer) = Gpu::for_surface(features, transparent, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()))?;
                     prewarmed = renderer;
                     let gpu = Arc::new(gpu);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);

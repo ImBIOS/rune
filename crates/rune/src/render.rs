@@ -487,6 +487,12 @@ impl Gpu {
     /// Like `try_new`, also enabling whichever of `wanted` the adapter supports.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn try_with_features(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features) -> Result<Gpu, String> {
+        Self::try_for(instance, surface, wanted, false)
+    }
+
+    /// Like `try_with_features`, preferring for a `translucent` surface `translucency::prefer`'s adapter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_for(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features, translucent: bool) -> Result<Gpu, String> {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -495,6 +501,7 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .map_err(|error| format!("no GPU adapter: {error}"))?;
+        let adapter = match surface { Some(s) if translucent => crate::translucency::prefer(&instance, s, adapter), _ => adapter };
         let optional_features = wgpu::Features::TIMESTAMP_QUERY | wanted;
         #[cfg(target_os = "macos")]
         let optional_features = optional_features | wgpu::Features::PASSTHROUGH_SHADERS;
@@ -516,6 +523,9 @@ impl Gpu {
         Err("synchronous GPU initialization is unsupported on web; use App::run".into())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn try_for(i: wgpu::Instance, s: Option<&wgpu::Surface<'_>>, w: wgpu::Features, _: bool) -> Result<Gpu, String> { Self::try_with_features(i, s, w) }
+
     pub fn headless() -> Gpu {
         Self::new(Self::instance(), None)
     }
@@ -528,6 +538,8 @@ impl Gpu {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+        // An HWND's DXGI swapchain is opaque only; DirectComposition composites alpha on every GPU.
+        descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
         wgpu::Instance::new(descriptor)
     }
 
@@ -535,27 +547,28 @@ impl Gpu {
     /// `prewarm_gpu`'s device, with the renderer it made, when its adapter presents to that
     /// surface and has `wanted`'s features; otherwise a new device on the same instance, so the
     /// window never gets a second surface.
+    /// A `translucent` surface gets an adapter that composites translucent pixels when any can.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn for_surface<'w>(wanted: wgpu::Features, surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>)
-        -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
-        Self::for_surface_from(prewarm::take(), wanted, surface)
+    pub(crate) fn for_surface<'w>(wanted: wgpu::Features, translucent: bool,
+        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
+        Self::for_surface_from(prewarm::take(), wanted, translucent, surface)
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn for_surface_from<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features,
+    fn for_surface_from<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features, translucent: bool,
         surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
         let Some((early, renderer)) = early else {
             let instance = Self::instance();
             let surface = surface(&instance)?;
-            return Ok((Self::try_with_features(instance, Some(&surface), wanted)?, surface, None));
+            return Ok((Self::try_for(instance, Some(&surface), wanted, translucent)?, surface, None));
         };
         let surface = surface(&early.instance)?;
-        if early.adapter.is_surface_supported(&surface) && early.device.features().contains(wanted & early.adapter.features()) {
+        if crate::translucency::serves(&early, &surface, wanted, translucent) {
             return Ok((early, surface, Some(renderer)));
         }
         let instance = early.instance.clone();
         drop((renderer, early));
-        Ok((Self::try_with_features(instance, Some(&surface), wanted)?, surface, None))
+        Ok((Self::try_for(instance, Some(&surface), wanted, translucent)?, surface, None))
     }
 }
 
@@ -1443,7 +1456,7 @@ mod prewarm_tests {
         crate::prewarm_gpu();
         crate::prewarm_gpu();
         let layer = layer();
-        let (gpu, _surface, renderer) = match Gpu::for_surface(wgpu::Features::empty(), |i| surface(i, &layer)) {
+        let (gpu, _surface, renderer) = match Gpu::for_surface(wgpu::Features::empty(), false, |i| surface(i, &layer)) {
             Ok(taken) => taken,
             Err(error) => return eprintln!("skipped: {error}"),
         };
@@ -1451,7 +1464,7 @@ mod prewarm_tests {
         assert!(gpu.device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS));
         assert_eq!(renderer.format, wgpu::TextureFormat::Bgra8UnormSrgb);
         drop((renderer, gpu));
-        let (_, _surface, again) = Gpu::for_surface(wgpu::Features::empty(), |i| surface(i, &layer)).expect("a second GPU");
+        let (_, _surface, again) = Gpu::for_surface(wgpu::Features::empty(), false, |i| surface(i, &layer)).expect("a second GPU");
         assert!(again.is_none(), "the prewarmed GPU goes to one window");
 
         // A slot that already took or discarded a GPU ignores a later `start`, so a late
@@ -1480,7 +1493,7 @@ mod prewarm_tests {
         let renderer = Renderer::new(&early.device, wgpu::TextureFormat::Bgra8UnormSrgb);
         let layer = layer();
         let mut made = 0;
-        let (gpu, _surface, renderer) = Gpu::for_surface_from(Some((early, renderer)), wanted, |i| { made += 1; surface(i, &layer) })
+        let (gpu, _surface, renderer) = Gpu::for_surface_from(Some((early, renderer)), wanted, false, |i| { made += 1; surface(i, &layer) })
             .expect("a GPU with the wanted feature");
         assert_eq!(made, 1);
         assert!(renderer.is_none(), "the prewarmed renderer belongs to the dropped device");
@@ -1488,7 +1501,7 @@ mod prewarm_tests {
 
         let Ok(early) = Gpu::try_new(Gpu::instance(), None) else { return };
         let renderer = Renderer::new(&early.device, wgpu::TextureFormat::Bgra8UnormSrgb);
-        let (_, _surface, kept) = Gpu::for_surface_from(Some((early, renderer)), wgpu::Features::empty(), |i| surface(i, &layer)).expect("a GPU");
+        let (_, _surface, kept) = Gpu::for_surface_from(Some((early, renderer)), wgpu::Features::empty(), false, |i| surface(i, &layer)).expect("a GPU");
         assert!(kept.is_some(), "a suitable prewarmed device keeps its renderer");
     }
 }
