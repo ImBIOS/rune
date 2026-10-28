@@ -359,3 +359,39 @@ fn a_value_picks_the_roll_direction() {
         }
     }
 }
+
+/// Right-aligned, "9s" → "10s" widens the label to the left. With `trailing`, the "1" and "0"
+/// roll in where they come to rest while the "s" holds still; without it they ride in from the
+/// right with the label's slide, over the "s".
+#[test]
+fn a_trailing_label_rolls_new_digits_in_their_columns() {
+    fn view(s: &(String, bool), _cx: &mut Cx<(String, bool)>) -> El {
+        let k = Kit::neutral(true);
+        let label = RollingText::new("t", s.0.clone()).value(s.0.trim_end_matches('s').parse().unwrap()).font(k.ty.mono);
+        let label = if s.1 { label.trailing() } else { label };
+        rune::row().w(200.0).padding(20.0).justify_end().child(label.build(&k).motion(RollingText::SPRING).width_leads())
+    }
+    let drift = |trailing: bool| {
+        let mut rt = Runtime::new(("9s".to_string(), trailing), view, (400.0, 120.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.update(|s, _| s.0 = "10s".into());
+        let x = |rt: &Runtime<(String, bool)>, text: &str| {
+            rt.elements().into_iter().find(|e| !e.inert && e.text.as_deref() == Some(text) && e.key.as_deref().is_some_and(|k| k.starts_with("t."))).map(|e| (e.rect[0], e.target[0]))
+        };
+        let (mut new, mut s) = (0.0f32, 0.0f32);
+        let s0 = x(&rt, "s").unwrap().0;
+        for _ in 0..90 {
+            rt.frame(1.0 / 120.0);
+            for d in ["1", "0"] {
+                let (at, rest) = x(&rt, d).unwrap();
+                new = new.max((at - rest).abs());
+            }
+            s = s.max((x(&rt, "s").unwrap().0 - s0).abs());
+        }
+        (new, s)
+    };
+    let (new, s) = drift(true);
+    assert!(new < 0.75, "new digits roll in their columns: {new} pt off");
+    assert!(s < 0.5, "the s holds still: {s} pt");
+    assert!(drift(false).0 > 3.0, "without trailing they ride the slide");
+}

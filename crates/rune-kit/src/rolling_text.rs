@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use rune::text::Run;
-use rune::{Color, Edge, El, Spring, TextStyle, Transition, row, text};
+use rune::{Color, Edge, El, Spring, SpringPair, TextStyle, Transition, row, text};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::Kit;
@@ -36,6 +36,7 @@ struct Memory {
     next: u64,
     value: Option<f64>,
     falling: bool,
+    width: Option<f32>,
 }
 
 thread_local! {
@@ -57,6 +58,7 @@ pub struct RollingText {
     spring: Spring,
     from: Edge,
     value: Option<f64>,
+    trailing: bool,
 }
 
 impl RollingText {
@@ -74,6 +76,7 @@ impl RollingText {
             spring: Self::SPRING,
             from: Edge::Bottom,
             value: None,
+            trailing: false,
         }
     }
     pub fn font(mut self, font: TextStyle) -> Self {
@@ -102,11 +105,19 @@ impl RollingText {
         self.value = Some(value);
         self
     }
+    /// The label sits against its trailing edge (right-aligned), so it widens to the left. New
+    /// glyphs then roll in where they come to rest, rather than riding in from the right with
+    /// the label's slide: "9s" → "10s" rolls "10" in beside the "s", not over it.
+    pub fn trailing(mut self) -> Self {
+        self.trailing = true;
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let font = self.font.unwrap_or(k.ty.ui);
         let color = self.color.unwrap_or(k.c.text_base);
-        let (glyphs, falling) = keys(&self.key, &self.text, self.value);
+        let width = rune::text::measure(&self.text, &[], font, None).0;
+        let (glyphs, falling, was) = keys(&self.key, &self.text, self.value, width);
         let from = if falling { self.from.opposite() } else { self.from };
         let edge = (font.line_px() * 0.12).max(1.0);
         // The fades sit in padding that negative margins take back out of layout, so the resting
@@ -141,7 +152,16 @@ impl RollingText {
                 self.spring
             };
             let tr = if g.entered {
-                Transition::push(from)
+                let push = Transition::push(from);
+                match was.map(|w| width - w).filter(|d| self.trailing && d.abs() > 0.01) {
+                    // The label's left edge slides by its change in width, on its X spring; a new
+                    // glyph starts that far the other way, on the same spring, so on screen it
+                    // only rolls.
+                    Some(grow) => push
+                        .combined(Transition::offset(-grow, 0.0))
+                        .springs(SpringPair::new(Spring::new(self.spring.duration * rune_motion::WIDTH_LEAD, self.spring.bounce), push.springs.exit)),
+                    None => push,
+                }
             } else {
                 Transition::asymmetric(Transition::identity(), Transition::push(from))
             };
@@ -169,8 +189,8 @@ struct Glyph {
 
 /// Assigns each cluster of `text` a stable id: clusters matched to the previous text under `key`
 /// keep theirs, the rest get fresh ones. Also whether `value` fell since the last build that gave
-/// one (the last direction when it holds).
-fn keys(key: &str, text: &str, value: Option<f64>) -> (Vec<Glyph>, bool) {
+/// one (the last direction when it holds), and the label's last `width`.
+fn keys(key: &str, text: &str, value: Option<f64>, width: f32) -> (Vec<Glyph>, bool, Option<f32>) {
     MEMORY.with(|m| {
         let mut m = m.borrow_mut();
         let mem = m.entry(key.to_owned()).or_default();
@@ -198,7 +218,8 @@ fn keys(key: &str, text: &str, value: Option<f64>) -> (Vec<Glyph>, bool) {
         if value.is_some() {
             mem.value = value;
         }
-        (glyphs, falling)
+        let was = mem.width.replace(width);
+        (glyphs, falling, was)
     })
 }
 
@@ -294,10 +315,10 @@ mod tests {
 
     #[test]
     fn rebuilding_the_same_text_keeps_every_key() {
-        let a: Vec<u64> = keys("same", "0:30", None).0.iter().map(|g| g.id).collect();
-        let b: Vec<u64> = keys("same", "0:30", None).0.iter().map(|g| g.id).collect();
+        let a: Vec<u64> = keys("same", "0:30", None, 0.0).0.iter().map(|g| g.id).collect();
+        let b: Vec<u64> = keys("same", "0:30", None, 0.0).0.iter().map(|g| g.id).collect();
         assert_eq!(a, b);
-        let c = keys("same", "0:29", None).0;
+        let c = keys("same", "0:29", None, 0.0).0;
         assert_eq!((c[0].id, c[1].id), (a[0], a[1]));
         assert!(c[2].entered && c[3].entered && !c[0].entered);
         assert!(c[2].id > a[3] && c[3].id > a[3], "new glyphs never reuse an exiting key");
@@ -305,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_value_rolls_the_way_it_moves() {
-        let falls = |text: &str, v: Option<f64>| keys("dir", text, v).1;
+        let falls = |text: &str, v: Option<f64>| keys("dir", text, v, 0.0).1;
         assert!(!falls("9s", Some(9.0)), "the first build rolls nowhere, as counting up");
         assert!(!falls("10s", Some(10.0)), "rising");
         assert!(falls("8s", Some(8.0)), "falling");
