@@ -46,12 +46,12 @@ fn input_that_piles_up_between_frames_keeps_each_event_s_time() {
     {
         let _input = scope(Some(t1));
         let (event, key) = physical(PhysicalKeyCode::ArrowDown, Key::Down);
-        rt.physical_then(event, key, None);
+        rt.physical_then(event, key, None, None);
     }
     {
         let _input = scope(Some(t2));
         let (event, key) = physical(PhysicalKeyCode::ArrowUp, Key::Up);
-        rt.physical_then(event, key, None);
+        rt.physical_then(event, key, None, None);
     }
     {
         let _input = scope(Some(t3));
