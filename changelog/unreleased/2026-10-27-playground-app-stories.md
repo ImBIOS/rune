@@ -9,3 +9,8 @@
   puts the keyboard on them, the view gets `active` to mark what the keys move, and the hook
   gets each key first. Esc and Tab leave; ← no longer does there. `rune_knobs::side_key(groups,
   lens)` is the hook for `rune_knobs::inline`: ↑↓ pick a knob, ←→ step it.
+- **Playground stories take closures.** `Story::new`, `from_real`, `overlay`, `poll`, `trigger`,
+  `variant` and `side`, `Play::after`, and `Playground::page`, `trigger`, `variant`, `side` and
+  `side_real` take any `Fn` (or `FnOnce` for a step) where they took a `fn`, so a story table
+  can build its stories in a loop. Code passing fns compiles unchanged. `Story::trigger_tx` and
+  `Playground::trigger_tx` take a step that needs only the `Tx`.

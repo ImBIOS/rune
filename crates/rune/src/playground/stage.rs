@@ -3,14 +3,21 @@
 
 use super::*;
 
-/// A step a trigger runs, now or later on the logical clock: see [`Play::after`].
+/// A step a trigger runs, now or later on the logical clock, as a fn: see [`Play::after`].
+/// Triggers and `Play::after` take closures too.
 pub type Step<X> = fn(&mut X, &mut Play<'_, X>);
+
+/// A step queued on a stage, which runs once.
+pub(super) type Queued<X> = Box<dyn FnOnce(&mut X, &mut Play<'_, X>)>;
+
+/// A story's view, or a scene's side view, of state `X`.
+pub(super) type View<X> = Box<dyn Fn(&X, &mut Cx<X>) -> El>;
 
 /// What a trigger's steps get beside their state: the frame's [`Tx`] (`Play` derefs to it) and
 /// [`Play::after`] for the steps that follow.
 pub struct Play<'a, X> {
     tx: &'a mut Tx,
-    script: &'a mut Vec<(f64, Step<X>)>,
+    script: &'a mut Vec<(f64, Queued<X>)>,
     now: f64,
 }
 
@@ -18,8 +25,8 @@ impl<X> Play<'_, X> {
     /// Runs `step` `secs` after this one, on the runtime's logical clock. Times count from when
     /// this step was due, not from the frame that ran it, so a replay runs the same every time,
     /// headless runs included.
-    pub fn after(&mut self, secs: f64, step: Step<X>) {
-        self.script.push((self.now + secs.max(0.0), step));
+    pub fn after(&mut self, secs: f64, step: impl FnOnce(&mut X, &mut Play<'_, X>) + 'static) {
+        self.script.push((self.now + secs.max(0.0), Box::new(step)));
     }
 
     /// Drops every step still queued on this stage, a loop's next one included, so a trigger
@@ -52,7 +59,15 @@ impl<X> std::ops::DerefMut for Play<'_, X> {
 pub(super) struct Trigger<X> {
     pub(super) key: char,
     pub(super) label: &'static str,
-    pub(super) run: Step<X>,
+    pub(super) run: Rc<dyn Fn(&mut X, &mut Play<'_, X>)>,
+}
+
+impl<X: 'static> Trigger<X> {
+    /// Its step, to queue.
+    pub(super) fn queued(&self) -> Queued<X> {
+        let run = self.run.clone();
+        Box::new(move |x, play| run(x, play))
+    }
 }
 
 /// Runs `view`, through the hot-patch table in a hot build, unless the frame is rebuilding from
@@ -63,10 +78,37 @@ pub(crate) fn call<X: 'static>(view: fn(&X, &mut Cx<X>) -> El, state: &X, cx: &m
     view(state, cx)
 }
 
-pub(super) fn trigger<X>(key: char, label: &'static str, run: Step<X>) -> Trigger<X> {
+/// `view` as the playground keeps it: called through the hot-patch table in a hot build when
+/// it's a fn or a closure that captures nothing, as [`call`] does. A closure that captures
+/// runs as built: subsecond would take a pointer-sized one's captures for code.
+pub(super) fn view<X: 'static>(view: impl Fn(&X, &mut Cx<X>) -> El + 'static) -> View<X> {
+    Box::new(move |x, cx| hot_view(&view, x, cx))
+}
+
+fn hot_view<X: 'static, F: Fn(&X, &mut Cx<X>) -> El + 'static>(view: &F, state: &X, cx: &mut Cx<X>) -> El {
+    #[cfg(feature = "hot")]
+    if !crate::hot::originals_only() {
+        if let Some(f) = (view as &dyn Any).downcast_ref::<fn(&X, &mut Cx<X>) -> El>() { return call(*f, state, cx); }
+        if size_of::<F>() == 0 {
+            // SAFETY: a zero-sized `F` has no bytes to copy; the copy is forgotten, not dropped.
+            let mut hot = subsecond::HotFn::current(unsafe { std::ptr::read(view) });
+            let root = hot.call((state, cx));
+            std::mem::forget(hot);
+            return root;
+        }
+    }
+    view(state, cx)
+}
+
+pub(super) fn trigger<X>(key: char, label: &'static str, run: impl Fn(&mut X, &mut Play<'_, X>) + 'static) -> Trigger<X> {
     let key = key.to_ascii_lowercase();
     assert!(!matches!(key, 'j' | 'k'), "J and K move between stories; give the {label:?} trigger another key");
-    Trigger { key, label, run }
+    Trigger { key, label, run: Rc::new(run) }
+}
+
+/// A trigger whose step takes just the [`Tx`].
+pub(super) fn trigger_tx<X>(key: char, label: &'static str, run: impl Fn(&mut X, &mut Tx) + 'static) -> Trigger<X> {
+    trigger(key, label, move |x: &mut X, play: &mut Play<'_, X>| run(x, play))
 }
 
 /// How far past the clock a step can be due and still run on this frame, in seconds.
@@ -75,7 +117,7 @@ const DUE_SLACK: f64 = 1e-6;
 /// A stage's state and its triggers' queued steps.
 pub(super) struct Stage<X> {
     pub(super) state: X,
-    pub(super) script: Vec<(f64, Step<X>)>,
+    pub(super) script: Vec<(f64, Queued<X>)>,
 }
 
 impl<X> Stage<X> {

@@ -2258,7 +2258,12 @@ App::new(spec).playground(
   a replay runs the same every time, headless included. `Play::clear()` drops every step still
   queued, a loop's next one included, so a trigger can take over from a running one:
   `play.clear(); play.after(0.2, ..)` runs only the new steps. It leaves the state and running
-  animations alone. J and K can't be trigger keys.
+  animations alone. J and K can't be trigger keys. `trigger_tx(key, label, |s, tx| ..)` takes a
+  step that needs only the `Tx`, such as a handler the app already has.
+- **Closures.** A story's `init`, `view`, `poll`, triggers, steps, variants and side view, and a
+  scene's triggers, variants and side views, take closures as well as fns, so a story table can
+  make its stories in a loop, each capturing its row. In a hot build, views that are fns or
+  closures capturing nothing are patched live; a closure that captures runs as built.
 - **Variants.** `Story::variant(name, |p| ..)` and `Playground::variant(scene, name, |s| ..)` list
   variants in the side column; 1–9 pick one, which makes the state again on it. A story starts on
   its first variant, and digits it has no variant for reach the stage.
@@ -2334,8 +2339,9 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | The app's storybook                         | `App::playground`                                                      |
 | ------------------------------------------- | ---------------------------------------------------------------------- |
 | a story type implementing the trait         | `Story::new(name, init, view)`, or `Playground::page` for real state   |
+| a registered table of stories               | a loop of `Story::new(row.path, move \|\| .., move \|s, cx\| ..)`, closures capturing the row |
 | `group()` and `name()`                      | one name, `"Group/Name"`; groups keep the order they first appear in   |
-| the story's keys (`Action`s)                | `Story::trigger(key, label, step)`; `'r'` runs after each replay       |
+| the story's keys (`Action`s)                | `Story::trigger(key, label, step)`, or `trigger_tx` for a `Fn(&mut S, &mut Tx)`; `'r'` runs after each replay |
 | timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
 | the knobs column                            | `.side(view)`: `rune_knobs::inline` fills the column's width; `actions` fits it, up to 300 pt |
 | keys for the knobs                          | `.side_keys(view, rune_knobs::side_key(groups, lens))`: ↑↓ pick a knob, ←→ step it, Esc leaves |

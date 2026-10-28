@@ -41,8 +41,8 @@ impl<S: 'static> Live<S> {
     }
 
     /// The open scene's variant's fn, if it has variants.
-    pub(super) fn scene_variant(&self) -> Option<fn(&mut S)> {
-        self.variants.iter().filter(|(s, _, _)| *s == self.selected).nth(self.variant_at()).map(|(_, _, apply)| *apply)
+    pub(super) fn scene_variant(&self) -> Option<&dyn Fn(&mut S)> {
+        self.variants.iter().filter(|(s, _, _)| *s == self.selected).nth(self.variant_at()).map(|(_, _, apply)| apply.as_ref())
     }
 
     /// What a digit key does: the open story's variant it names, if it has that many.

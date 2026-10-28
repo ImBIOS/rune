@@ -212,7 +212,7 @@ impl<S: 'static> Live<S> {
             let (_, view) = self.sides.iter().find(|(s, _)| *s == self.selected)?;
             let mut stage = cx.retype::<S>();
             let root = match view {
-                Side::Stage(view) => call(*view, &scene.state, &mut stage),
+                Side::Stage(view) => view(&scene.state, &mut stage),
                 Side::Real(view) => view(&scene.state, app, &mut stage),
                 Side::Keys(view, _) => view(&scene.state, self.side_active, &mut stage),
             };
@@ -235,7 +235,7 @@ impl<S: 'static> Live<S> {
         let (w, h) = frame.or(preset).unwrap_or(area);
         let content = match (&self.scene, page) {
             (Some(scene), _) => Some(self.nested(cx, env, |c| call(view, &scene.state, c))),
-            (None, Some((_, Page { kind: Kind::Live(page), .. }))) => Some(self.nested(cx, env, |c| call(*page, app, c))),
+            (None, Some((_, Page { kind: Kind::Live(page), .. }))) => Some(self.nested(cx, env, |c| page(app, c))),
             (None, Some(_)) => self.own().map(|(own, stage)| {
                 let mut unit = cx.retype::<()>();
                 unit.set_env(env);

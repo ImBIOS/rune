@@ -9,6 +9,7 @@
 //! throughout and is back, untouched, after Back.
 
 use std::any::Any;
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::states::{States, StatesRef};
@@ -38,7 +39,7 @@ use nav::Row;
 pub use open::slug;
 pub(crate) use stage::call;
 pub use stage::{Play, Step};
-use stage::{Stage, Trigger, trigger};
+use stage::{Stage, Trigger, View, trigger, trigger_tx};
 pub use story::Story;
 use story::OwnStory;
 pub(crate) use testing::stage_element;
@@ -86,7 +87,7 @@ pub struct Playground<S: 'static> {
     scenes: Option<fn(&str) -> bool>,
     fresh: Option<fn(&S) -> S>,
     keep: Option<fn(&S, &mut S)>,
-    variants: Vec<(&'static str, &'static str, fn(&mut S))>,
+    variants: Vec<(&'static str, &'static str, Variant<S>)>,
     typing: Option<fn(&S) -> bool>,
     dark: Option<fn(&S) -> bool>,
 }
@@ -120,8 +121,8 @@ impl<S: 'static> Playground<S> {
 
     /// A page drawn by `view` from the app's live state. Its handlers change the real state,
     /// and it has no triggers or replay.
-    pub fn page(mut self, name: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
-        self.pages.push(Page { name, kind: Kind::Live(view) });
+    pub fn page(mut self, name: &'static str, view: impl Fn(&S, &mut Cx<S>) -> El + 'static) -> Self {
+        self.pages.push(Page { name, kind: Kind::Live(stage::view(view)) });
         self
     }
 
@@ -136,31 +137,37 @@ impl<S: 'static> Playground<S> {
     /// its button in the side column does. An `'r'` trigger runs when the scene is chosen and on
     /// each replay, so its motion plays at once. See
     /// [`Story::trigger`].
-    pub fn trigger(mut self, scene: &'static str, key: char, label: &'static str, run: Step<S>) -> Self {
+    pub fn trigger(mut self, scene: &'static str, key: char, label: &'static str, run: impl Fn(&mut S, &mut Play<'_, S>) + 'static) -> Self {
         self.triggers.push((scene, trigger(key, label, run)));
+        self
+    }
+
+    /// [`Playground::trigger`] with a step that takes just the [`Tx`]. See [`Story::trigger_tx`].
+    pub fn trigger_tx(mut self, scene: &'static str, key: char, label: &'static str, run: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.triggers.push((scene, trigger_tx(key, label, run)));
         self
     }
 
     /// The app's own controls for the scene named `scene` (its path, or just its name), at the
     /// top of the side column, drawn from and acting on the scene's stage state: knobs, say.
     /// See [`Story::side`].
-    pub fn side(mut self, scene: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
-        self.sides.push((scene, Side::Stage(view)));
+    pub fn side(mut self, scene: &'static str, view: impl Fn(&S, &mut Cx<S>) -> El + 'static) -> Self {
+        self.sides.push((scene, Side::Stage(stage::view(view))));
         self
     }
 
     /// A variant of the scene named `scene` (its path, or just its name): `apply` runs on its
     /// state after the scene fn. See [`Story::variant`].
-    pub fn variant(mut self, scene: &'static str, name: &'static str, apply: fn(&mut S)) -> Self {
-        self.variants.push((scene, name, apply));
+    pub fn variant(mut self, scene: &'static str, name: &'static str, apply: impl Fn(&mut S) + 'static) -> Self {
+        self.variants.push((scene, name, Box::new(apply)));
         self
     }
 
     /// [`Playground::side`], drawn from the stage and the real state both: to mark the app's
     /// own choice beside the one the stage previews, say, with a control that calls
     /// [`Tx::keep_playground`] to write the preview back through [`Playground::keep`].
-    pub fn side_real(mut self, scene: &'static str, view: fn(&S, &S, &mut Cx<S>) -> El) -> Self {
-        self.sides.push((scene, Side::Real(view)));
+    pub fn side_real(mut self, scene: &'static str, view: impl Fn(&S, &S, &mut Cx<S>) -> El + 'static) -> Self {
+        self.sides.push((scene, Side::Real(Box::new(view))));
         self
     }
 
@@ -251,10 +258,13 @@ impl<S: 'static> Playground<S> {
 /// A scene's side column view, from [`Playground::side`], [`Playground::side_real`] or
 /// [`Playground::side_keys`].
 enum Side<S: 'static> {
-    Stage(fn(&S, &mut Cx<S>) -> El),
-    Real(fn(&S, &S, &mut Cx<S>) -> El),
+    Stage(View<S>),
+    Real(Box<dyn Fn(&S, &S, &mut Cx<S>) -> El>),
     Keys(SideView<S>, SideKey<S>),
 }
+
+/// A variant's setup, run on a new stage state.
+type Variant<X> = Box<dyn Fn(&mut X)>;
 
 /// A side column view that takes keys, told whether the keyboard is on it.
 type SideView<X> = Box<dyn Fn(&X, bool, &mut Cx<X>) -> El>;
@@ -267,7 +277,7 @@ struct Page<S: 'static> {
 }
 
 enum Kind<S: 'static> {
-    Live(fn(&S, &mut Cx<S>) -> El),
+    Live(View<S>),
     Own(Box<dyn OwnStory>),
 }
 

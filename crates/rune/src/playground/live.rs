@@ -8,7 +8,7 @@ pub(crate) struct Live<S: 'static> {
     /// By the scene they're for.
     pub(super) triggers: Vec<(usize, Trigger<S>)>,
     pub(super) sides: Vec<(usize, Side<S>)>,
-    pub(super) variants: Vec<(usize, &'static str, fn(&mut S))>,
+    pub(super) variants: Vec<(usize, &'static str, Variant<S>)>,
     /// Each story's variant, by its index into scenes then pages, until the playground closes.
     pub(super) variant: Vec<usize>,
     pub(super) sizes: Vec<(&'static str, (f32, f32))>,
@@ -279,12 +279,13 @@ impl<S: 'static> Live<S> {
         let scene_clock = crate::SceneClock { now: self.now, dt: 1.0 / 60.0 };
         if let Some((_, f)) = self.scenes.get(self.selected) {
             let (init, fresh, variant) = (self.init, self.fresh, self.scene_variant());
-            self.scene = Some(Box::new(Stage::new(crate::with_scene_clock(scene_clock, || {
+            let state = crate::with_scene_clock(scene_clock, || {
                 let mut s = fresh.map_or_else(init, |fresh| fresh(real));
                 f(&mut s);
                 if let Some(variant) = variant { variant(&mut s); }
                 s
-            }))));
+            });
+            self.scene = Some(Box::new(Stage::new(state)));
         } else if let Some((i, page)) = self.page() && let Kind::Own(own) = &page.kind && self.owned[i].is_none() {
             let variant = self.variant[self.selected];
             let stage = crate::with_scene_clock(scene_clock, || own.init(&*real, variant));
@@ -301,7 +302,7 @@ impl<S: 'static> Live<S> {
         let now = self.now;
         if let Some(scene) = &mut self.scene {
             if let Some((_, t)) = self.triggers.iter().find(|(s, t)| *s == self.selected && t.key == key) {
-                scene.script.push((now, t.run));
+                scene.script.push((now, t.queued()));
             }
             return;
         }

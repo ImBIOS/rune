@@ -17,39 +17,40 @@ use super::*;
 pub struct Story<P: 'static> {
     pub(super) name: &'static str,
     init: Init<P>,
-    view: fn(&P, &mut Cx<P>) -> El,
-    poll: Option<fn(&mut P, f64, &mut Tx) -> bool>,
+    view: View<P>,
+    poll: Option<Box<dyn Fn(&mut P, f64, &mut Tx) -> bool>>,
     frame: Option<(f32, f32)>,
     triggers: Vec<Trigger<P>>,
     /// Its view, told whether the keyboard is on it.
     side: Option<SideView<P>>,
     side_key: Option<SideKey<P>>,
-    variants: Vec<(&'static str, fn(&mut P))>,
+    variants: Vec<(&'static str, Variant<P>)>,
 }
 
 impl<P: 'static> Story<P> {
-    /// `name` may be a `"Group/Name"` path.
-    pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None, side_key: None, variants: Vec::new() }
+    /// `name` may be a `"Group/Name"` path. `init` and `view` may be closures, so a story
+    /// table can make its stories in a loop, each capturing its row.
+    pub fn new(name: &'static str, init: impl Fn() -> P + 'static, view: impl Fn(&P, &mut Cx<P>) -> El + 'static) -> Self {
+        Story { name, init: Init::New(Box::new(init)), view: stage::view(view), poll: None, frame: None, triggers: Vec::new(), side: None, side_key: None, variants: Vec::new() }
     }
 
     /// A story whose state `derive` makes from the app's real state, each time it's made: when
     /// it first shows, and on R. `S` is the playground's app state.
-    pub fn from_real<S: 'static>(name: &'static str, derive: fn(&S) -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
+    pub fn from_real<S: 'static>(name: &'static str, derive: impl Fn(&S) -> P + 'static, view: impl Fn(&P, &mut Cx<P>) -> El + 'static) -> Self {
         let init = Init::Real(std::any::TypeId::of::<S>(), Box::new(move |real: &dyn Any| derive(real.downcast_ref().expect("checked by Playground::story"))));
         Story { init, ..Story::new(name, || unreachable!(), view) }
     }
 
     /// An overlay's view at its size, in a dashed frame over the stage (the overlay's clear
     /// parts stay clear), with a state made by `init`.
-    pub fn overlay(name: &'static str, spec: &OverlaySpec<P>, init: fn() -> P) -> Self {
+    pub fn overlay(name: &'static str, spec: &OverlaySpec<P>, init: impl Fn() -> P + 'static) -> Self {
         Story { frame: Some(spec.size), ..Story::new(name, init, spec.view) }
     }
 
     /// Called every frame while the story shows, as `AppSpec::poll` is, after its due steps:
     /// true when it changed the state.
-    pub fn poll(mut self, poll: fn(&mut P, f64, &mut Tx) -> bool) -> Self {
-        self.poll = Some(poll);
+    pub fn poll(mut self, poll: impl Fn(&mut P, f64, &mut Tx) -> bool + 'static) -> Self {
+        self.poll = Some(Box::new(poll));
         self
     }
 
@@ -57,15 +58,23 @@ impl<P: 'static> Story<P> {
     /// button in the side column does. [`Play::after`] queues the steps that follow, on the
     /// logical clock. An `'r'` trigger runs whenever the state is made: when the story first
     /// shows, and on R, which always replays. J and K are taken.
-    pub fn trigger(mut self, key: char, label: &'static str, run: Step<P>) -> Self {
+    pub fn trigger(mut self, key: char, label: &'static str, run: impl Fn(&mut P, &mut Play<'_, P>) + 'static) -> Self {
         self.triggers.push(trigger(key, label, run));
+        self
+    }
+
+    /// [`Story::trigger`] with a step that takes just the [`Tx`], for a handler the app already
+    /// has: `.trigger_tx('s', "Send", Chat::send)` for `fn send(&mut Chat, &mut Tx)`.
+    pub fn trigger_tx(mut self, key: char, label: &'static str, run: impl Fn(&mut P, &mut Tx) + 'static) -> Self {
+        self.triggers.push(trigger_tx(key, label, run));
         self
     }
 
     /// The app's own controls for this story, at the top of the side column, drawn from and
     /// acting on its state: knobs, say.
-    pub fn side(mut self, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        self.side = Some(Box::new(move |p, _, cx| call(view, p, cx)));
+    pub fn side(mut self, view: impl Fn(&P, &mut Cx<P>) -> El + 'static) -> Self {
+        let view = stage::view(view);
+        self.side = Some(Box::new(move |p, _, cx| view(p, cx)));
         self.side_key = None;
         self
     }
@@ -99,8 +108,8 @@ impl<P: 'static> Story<P> {
     /// A variant: `apply` runs on the state after `init`. Keys 1 to 9, or its row in the side
     /// column, switch between them, making the state again as R does. A story with variants
     /// starts on its first.
-    pub fn variant(mut self, name: &'static str, apply: fn(&mut P)) -> Self {
-        self.variants.push((name, apply));
+    pub fn variant(mut self, name: &'static str, apply: impl Fn(&mut P) + 'static) -> Self {
+        self.variants.push((name, Box::new(apply)));
         self
     }
 
@@ -115,7 +124,7 @@ impl<P: 'static> Story<P> {
 
 /// How a story makes its state: from nothing, or from the real state, of the type named.
 enum Init<P> {
-    New(fn() -> P),
+    New(Box<dyn Fn() -> P>),
     Real(std::any::TypeId, Box<dyn Fn(&dyn Any) -> P>),
 }
 
@@ -160,7 +169,7 @@ impl<P: 'static> OwnStory for Story<P> {
     }
     fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El {
         let mut own = cx.retype::<P>();
-        let root = call(self.view, &Self::stage(stage).state, &mut own);
+        let root = (self.view)(&Self::stage(stage).state, &mut own);
         cx.absorb(own);
         root
     }
@@ -180,14 +189,14 @@ impl<P: 'static> OwnStory for Story<P> {
     fn poll(&self, stage: &mut dyn Any, t: f64, tx: &mut Tx) -> bool {
         let stage = Self::stage_mut(stage);
         let ran = stage.run(t, tx);
-        self.poll.is_some_and(|poll| poll(&mut stage.state, t, tx)) || ran
+        self.poll.as_ref().is_some_and(|poll| poll(&mut stage.state, t, tx)) || ran
     }
     fn polls(&self, stage: &dyn Any) -> bool {
         self.poll.is_some() || !Self::stage(stage).script.is_empty()
     }
     fn trigger(&self, stage: &mut dyn Any, key: char, now: f64) -> bool {
         let Some(t) = self.triggers.iter().find(|t| t.key == key) else { return false };
-        Self::stage_mut(stage).script.push((now, t.run));
+        Self::stage_mut(stage).script.push((now, t.queued()));
         true
     }
     fn stop(&self, stage: &mut dyn Any) {
