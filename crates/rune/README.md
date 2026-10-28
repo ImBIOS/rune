@@ -2322,7 +2322,7 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | `group()` and `name()`                      | one name, `"Group/Name"`; groups keep the order they first appear in   |
 | the story's keys (`Action`s)                | `Story::trigger(key, label, step)`; `'r'` runs after each replay       |
 | timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
-| the knobs column                            | `.side(view)`, with `rune_knobs::inline` and `rune_knobs::actions` in it |
+| the knobs column                            | `.side(view)`: `rune_knobs::inline` fills the column's width; `actions` fits it, up to 300 pt |
 | a choice knob flipped with 1–9              | `Story::variant(name, apply)`; 1–9 pick, and picking remakes the state |
 | setup from the app's state                  | `Story::from_real(name, derive, view)`, or `Playground::fresh`         |
 | collapsible groups                          | built in: click a header, or ← → ↵ on it                               |

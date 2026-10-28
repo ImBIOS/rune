@@ -9,6 +9,9 @@ use crate::{Action, Group, Knobs, Style, icons};
 
 const W: f32 = 300.0;
 const CARD_W: f32 = W - 2.0 * PAD;
+/// Where an inline panel's first frame starts, before its card's laid-out width is known: the
+/// playground's side column.
+const INLINE_CARD_W: f32 = 220.0;
 
 const TAG: TextStyle = TextStyle::new(11.0, 550.0).lh(14.0);
 
@@ -88,15 +91,18 @@ pub(crate) fn overlay<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style
 
 /// The panel alone, for an app's own layout (a storybook's right-hand column): it doesn't
 /// float, pick regions or take keys itself, and a single group shows no tabs. The app sends it
-/// ↑ ↓ ← → with [`Knobs::panel_key`]; `active` marks the knob those keys move.
+/// ↑ ↓ ← → with [`Knobs::panel_key`]; `active` marks the knob those keys move. It fills its
+/// parent's width, and its rows lay out from the width they get (a slider's track grows with
+/// it), so a 240 pt column and a 300 pt one both read.
 pub fn inline<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&mut S) -> &mut Knobs, active: bool) -> El {
     panel(k, groups, st, lens, Some(active))
 }
 
 /// A card of buttons that each do one thing, with the key that does it on a cap: a story's
-/// triggers ("R  Replay", "F  Finish a task"). The app binds the keys.
+/// triggers ("R  Replay", "F  Finish a task"). The app binds the keys. It fills its parent's
+/// width up to 300 pt.
 pub fn actions<S: 'static>(st: Style, items: &[Action<S>]) -> El {
-    let mut card = col().key("knobs-actions").w(W).padding(4.0).gap(2.0).radius(12.0).fill(st.bg).border_gradient(0.5, st.rim, st.border);
+    let mut card = col().key("knobs-actions").w_full().max_w(W).padding(4.0).gap(2.0).radius(12.0).fill(st.bg).border_gradient(0.5, st.rim, st.border);
     for (i, a) in items.iter().enumerate() {
         let run = a.run;
         card = card.child(
@@ -200,12 +206,14 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
         );
     }
 
-    let p = col().key("knobs-panel").w(W).padding(PAD).radius(12.0).fill(st.bg).border_gradient(0.5, st.rim, st.border);
+    let p = col().key("knobs-panel");
+    let p = if inline.is_some() { p.w_full() } else { p.w(W) };
+    let p = p.padding(PAD).radius(12.0).fill(st.bg).border_gradient(0.5, st.rim, st.border);
     if let Some(active) = inline {
         let p = p.child(head.pl(PAD));
         let p = if groups.len() > 1 { p.child(tabs.mt(4.0)).child(el().key("knobs-rule").w_full().h(0.5).fill(st.border)) } else { p };
         return match g {
-            Some(g) => body(p, k, groups, &g, st, lens, active),
+            Some(g) => body(true, p, k, groups, &g, st, lens, active),
             None => p,
         };
     }
@@ -235,12 +243,12 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
     let Some(g) = g else {
         return p.child(text("Click a part of the window to tune it.").key("knobs-hint").font(LABEL).color(st.fg3).px(PAD).mt(12.0).mb(4.0));
     };
-    body(p, k, groups, &g, st, lens, k.kbd)
+    body(false, p, k, groups, &g, st, lens, k.kbd)
 }
 
 /// The presets and the knobs' card, under the panel's head; `active` marks the keyboard's knob.
-fn body<S: 'static>(p: El, k: &Knobs, groups: &[Group], g: &Group, st: Style, lens: fn(&mut S) -> &mut Knobs, active: bool) -> El {
-    let cx = Ctx { k, st, lens, w: CARD_W };
+fn body<S: 'static>(inline: bool, p: El, k: &Knobs, groups: &[Group], g: &Group, st: Style, lens: fn(&mut S) -> &mut Knobs, active: bool) -> El {
+    let cx = Ctx { k, st, lens, w: if inline { INLINE_CARD_W } else { CARD_W } };
     let gi = groups.iter().position(|x| x.name == g.name).unwrap_or(0);
     let all: Vec<usize> = (0..g.knobs.len()).collect();
     let mark = (active && !all.is_empty()).then(|| k.cursor.min(all.len() - 1));

@@ -67,5 +67,10 @@ Story::new("Cards/Card", Card::default, card_view)
     .side(|c: &Card, _| rune_knobs::inline(&c.knobs, GROUPS, Style::dark(), |c: &mut Card| &mut c.knobs, false))
 ```
 
+`inline` fills its parent's width (the column's 240 pt or more), and its rows lay out from the
+width they get: a slider's track grows with the column, and a choice sits beside its label or
+under it as the room allows. The floating panel keeps its own 300 pt. `Style::light()` is the
+light look. `examples/knobs` has this story (`-- --playground Knobs`).
+
 `Playground::side(scene, view)` does the same for one of the app's scenes, against a scene's
 fresh copy of the app state.

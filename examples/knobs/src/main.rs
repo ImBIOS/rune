@@ -1,23 +1,26 @@
 //! A card tuned live with `rune-knobs`: ⌘⇧K slides the panel in beside the page, and its sliders
 //! and choices change the card as you drag. `cargo run -p knobs`; `-- --snap knobs.png --scene
-//! open` renders it headless with the panel open.
+//! open` renders it headless with the panel open, and `-- --playground "Knobs"` opens the
+//! playground, whose side column hosts the same knobs as rows.
 
 use rune::tok::{self, type_};
-use rune::{AppSpec, Cx, El, KeyEvent, Tx, col, text};
+use rune::{App, AppSpec, Cx, El, KeyEvent, Playground, Story, Tx, col, text};
 use rune_knobs::{Group, Knob, Knobs, Preset, Style};
 
 const RADIUS: Knob = Knob::new("Card radius", 0.0, 32.0, 14.0).about("How round the card's corners are");
 const PAD: Knob = Knob::new("Card padding", 8.0, 48.0, 24.0).step(1.0);
 const TINT: Knob = Knob::choice("Card tint", &["Plain", "Accent", "Raised"], 0);
-const GROUPS: &[Group] = &[Group::new("Card", "card", &[RADIUS, PAD, TINT]).presets(&[Preset { name: "Round", values: &[("Card radius", 28.0)] }])];
+const SHADOW: Knob = Knob::choice("Card shadow", &["Off", "On"], 0);
+const GROUPS: &[Group] = &[Group::new("Card", "card", &[RADIUS, PAD, TINT, SHADOW]).presets(&[Preset { name: "Round", values: &[("Card radius", 28.0)] }])];
 
 #[derive(Default)]
 struct State {
     knobs: Knobs,
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
-    let t = tok::theme(true);
+fn page(s: &State, cx: &mut Cx<State>) -> El {
+    let t = tok::theme(cx.system_dark());
+    let ink = if cx.system_dark() { t.bg } else { t.text };
     let k = &s.knobs;
     let fill = match k.get(&TINT) as usize {
         1 => tok::accent(0, true),
@@ -26,15 +29,29 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
     };
     let card = col()
         .key("card")
+        .shadow(if k.get(&SHADOW) > 0.5 { 10.0 } else { 0.0 }, 24.0, t.bg.alpha(0.35))
         .w(240.0)
         .padding(k.get(&PAD))
         .gap(6.0)
         .radius(k.get(&RADIUS))
         .fill(fill)
-        .child(text("Tune me").font(type_::TITLE).color(t.bg))
-        .child(text("⌘⇧K opens the knobs").color(t.bg));
-    let page = col().key("page").grow(1.0).h_full().center().fill(t.bg).child(card);
-    rune_knobs::side(page, k, GROUPS, Style::dark(), |s: &mut State| &mut s.knobs)
+        .child(text("Tune me").font(type_::TITLE).color(ink))
+        .child(text("⌘⇧K opens the knobs").color(ink));
+    col().key("page").grow(1.0).h_full().center().fill(t.bg).child(card)
+}
+
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let page = page(s, cx);
+    rune_knobs::side(page, &s.knobs, GROUPS, style(cx), |s: &mut State| &mut s.knobs)
+}
+
+fn style(cx: &Cx<State>) -> Style {
+    if cx.system_dark() { Style::dark() } else { Style::light() }
+}
+
+/// The playground's side column: the same knobs as rows, filling its width.
+fn story_side(s: &State, cx: &mut Cx<State>) -> El {
+    rune_knobs::inline(&s.knobs, GROUPS, style(cx), |s: &mut State| &mut s.knobs, false)
 }
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -46,11 +63,12 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
-    rune::run(AppSpec::<State> {
+    let spec = AppSpec::<State> {
         scenes: &[("open", |s| s.knobs.show())],
         on_key: Some(on_key),
         ..AppSpec::new("Knobs", (820.0, 520.0), State::default, view)
-    });
+    };
+    App::new(spec).playground(Playground::<State>::new().story(Story::new("Card/Knobs", State::default, page).side(story_side))).run();
 }
 
 #[cfg(test)]

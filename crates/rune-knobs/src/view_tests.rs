@@ -138,3 +138,130 @@ fn undo_and_reset_are_disabled_until_there_is_something_to_undo() {
     click(&mut rt, "knobs-reset");
     assert!(!rt.state.knobs.can_reset(&GROUPS[0]));
 }
+
+mod inline_width {
+    use super::*;
+
+    const WIDE: Knob = Knob::new("A rather long slider label here", 0.0, 100.0, 50.0).step(1.0);
+    const PICK: Knob = Knob::choice("Tint", &["Plain", "Accent", "Raised"], 1);
+    const MANY: Knob = Knob::choice(
+        "Corner style",
+        &["Sharp", "Soft", "Round", "Pill", "Squircle"],
+        0,
+    );
+    const G: &[Group] = &[Group::new("Card", "card", &[L, WIDE, PICK, MANY])];
+
+    struct W {
+        knobs: Knobs,
+        w: f32,
+    }
+
+    fn inline_view(s: &W, _: &mut Cx<W>) -> El {
+        row()
+            .key("root")
+            .w_full()
+            .h_full()
+            .child(col().key("column").w(s.w).child(inline(
+                &s.knobs,
+                G,
+                Style::dark(),
+                |s: &mut W| &mut s.knobs,
+                false,
+            )))
+    }
+
+    fn rects(w: f32) -> Vec<rune::ElementInfo> {
+        let mut rt = Runtime::new(
+            W {
+                knobs: Knobs::default(),
+                w,
+            },
+            inline_view,
+            (400.0, 700.0),
+            Env::new(true, 1.0),
+        );
+        for _ in 0..6 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt.elements()
+    }
+
+    fn rect(es: &[rune::ElementInfo], key: &str) -> [f32; 4] {
+        es.iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no {key}"))
+            .rect
+    }
+
+    #[test]
+    fn rows_stay_inside_the_column_at_240_and_300() {
+        for w in [200.0, 240.0, 300.0] {
+            let es = rects(w);
+            let card = rect(&es, "knobs-card");
+            assert!(
+                card[0] >= 0.0 && card[0] + card[2] <= w + 0.01,
+                "card in {w}: {card:?}"
+            );
+            for e in es
+                .iter()
+                .filter(|e| e.path.contains("knobs-card") && e.key.is_some())
+            {
+                let r = e.rect;
+                assert!(
+                    r[0] >= card[0] - 0.01 && r[0] + r[2] <= card[0] + card[2] + 0.01,
+                    "{:?} at {w}: {r:?} vs {card:?}",
+                    e.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_slider_track_is_usable_and_grows_with_the_column() {
+        let mut last = 0.0;
+        for w in [200.0, 240.0, 300.0] {
+            let es = rects(w);
+            let track = rect(&es, "knobs-knob-0");
+            assert!(track[2] > 100.0, "{w}: {track:?}");
+            assert!(track[2] > last, "{w}");
+            last = track[2];
+            let fill = es
+                .iter()
+                .find(|e| e.path.contains("knobs-knob-0") && e.key.as_deref() == Some("fill"))
+                .unwrap()
+                .rect;
+            assert!(
+                (fill[2] - track[2] * 0.5).abs() < 0.6,
+                "fill is the value's share of the track at {w}: {fill:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_that_does_not_fit_beside_its_label_wraps_to_a_grid_when_narrow() {
+        let wide = rects(300.0);
+        let narrow = rects(200.0);
+        assert!(rect(&narrow, "knobs-knob-3")[3] > rect(&wide, "knobs-knob-3")[3] - 0.01);
+        assert!(
+            rect(&narrow, "knobs-knob-3")[3] > 40.0,
+            "the five options sit under their label"
+        );
+    }
+
+    #[test]
+    fn the_floating_panel_keeps_its_300_points() {
+        let mut s = T {
+            knobs: Knobs::default(),
+        };
+        s.knobs.show();
+        let mut rt = Runtime::new(s, view, (1000.0, 700.0), Env::new(true, 1.0));
+        settle(&mut rt);
+        let p = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("knobs-panel"))
+            .unwrap()
+            .rect;
+        assert_eq!(p[2], 300.0);
+    }
+}

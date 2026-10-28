@@ -74,7 +74,13 @@ fn hovers<S: 'static>(e: El, lens: fn(&mut S) -> &mut Knobs, name: &'static str)
 }
 
 /// Knobs `show` of `g` (group `gi` of the panel's) on one card; `mark` is the keyboard's knob.
-pub(crate) fn card<S: 'static>(cx: Ctx<'_, S>, g: &Group, gi: usize, show: &[usize], mark: Option<usize>) -> El {
+pub(crate) fn card<S: 'static>(mut cx: Ctx<'_, S>, g: &Group, gi: usize, show: &[usize], mark: Option<usize>) -> El {
+    // The rows that choose a layout by width (a choice: beside its label, or a grid) read the
+    // card's laid-out width; `cx.w` is where the first frame starts. The read is rounded, so
+    // only a real resize rebuilds.
+    if let Some(w) = rune::memo::layout_with("knobs-card", |r| r[2].round()) {
+        cx.w = w;
+    }
     let mut card = col().key("knobs-card").w_full().radius(8.0).fill(cx.st.fill).clip_rounded(8.0);
     for (n, &i) in show.iter().enumerate() {
         let d = &g.knobs[i];
@@ -166,7 +172,7 @@ fn readout(d: &Knob, v: f32) -> String {
 
 fn slider<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
     let i = id.i;
-    let (k, st, lens, w) = (cx.k, cx.st, cx.lens, cx.w);
+    let (k, st, lens) = (cx.k, cx.st, cx.lens);
     let v = k.get(&d);
     let frac = if d.max > d.min { (v - d.min) / (d.max - d.min) } else { 0.0 };
     let hot = k.hot.as_deref() == Some(d.name);
@@ -199,15 +205,17 @@ fn slider<S: 'static>(cx: Ctx<'_, S>, id: Id, d: Knob) -> El {
                 }
             }
         })
-        .child(el().key("fill").absolute(0.0, 0.0).w(frac * w).h(ROW).fill(tint))
         .child(
-            el().key("handle")
-                .absolute((frac * w - 1.5).clamp(0.0, w - 3.0), 6.0)
-                .w(3.0)
-                .h(ROW - 12.0)
-                .radius(1.5)
-                .fill(st.handle)
-                .opacity(if held { 0.95 } else if hot { 0.65 } else { 0.0 }),
+            row().key("fill").absolute(0.0, 0.0).w_frac(frac).h(ROW).fill(tint).child(spacer()).child(
+                el().key("handle")
+                    .w(3.0)
+                    .min_w(3.0)
+                    .h(ROW - 12.0)
+                    .mt(6.0)
+                    .radius(1.5)
+                    .fill(st.handle)
+                    .opacity(if held { 0.95 } else if hot { 0.65 } else { 0.0 }),
+            ),
         )
         .child(
             row()

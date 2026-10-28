@@ -644,6 +644,31 @@ impl Style {
             outline: Color::WHITE.alpha(0.55),
         }
     }
+
+    /// The light look: white card, dark text, grey fills.
+    pub fn light() -> Self {
+        let h = |s: &str| rune::color::hex(s).unwrap_or(Color::WHITE);
+        Self {
+            bg: h("#ffffff"),
+            inset: h("#ececee"),
+            raised: h("#ffffff"),
+            fg: h("#1d1d1f"),
+            fg2: h("#4a4a4d"),
+            fg3: h("#8a8a8d"),
+            fill: h("#f3f3f5"),
+            fill_hover: h("#ececee"),
+            fill_selected: h("#e4e4e7"),
+            slider: h("#dcdce0"),
+            slider_hover: h("#d3d3d8"),
+            slider_active: h("#c8c8ce"),
+            handle: h("#1d1d1f"),
+            border: h("#e2e2e5"),
+            rule: Color::BLACK.alpha(0.05),
+            rim: h("#ffffff"),
+            shadow: Color::BLACK.alpha(0.18),
+            outline: Color::BLACK.alpha(0.45),
+        }
+    }
 }
 
 impl Default for Style {
