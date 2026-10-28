@@ -575,6 +575,22 @@ pub fn key(k: &mut Knobs, ev: &KeyEvent) -> bool {
     true
 }
 
+/// [`Knobs::panel_key`] as the keys of a playground story's side column, for
+/// `rune::Story::side_keys` beside [`inline`]: ↑ ↓ pick a knob, ← → step it (⇧ for 10×), `[`
+/// and `]` switch groups. It leaves Esc and Tab to the playground, which leaves the column.
+pub fn side_key<S: 'static>(groups: &'static [Group], lens: fn(&mut S) -> &mut Knobs) -> impl Fn(&mut S, &KeyEvent, &mut rune::Tx) -> bool + 'static {
+    move |s, ev, tx| {
+        if matches!(ev.key, rune::Key::Escape | rune::Key::Tab) {
+            return false;
+        }
+        let taken = lens(s).panel_key(groups, ev);
+        if taken {
+            tx.instant();
+        }
+        taken
+    }
+}
+
 /// Without the `panel` feature the layer is an empty element.
 #[cfg(not(feature = "panel"))]
 pub fn layer<S: 'static>(_: &Knobs, _: &'static [Group], _: Style, _: fn(&mut S) -> &mut Knobs) -> rune::El {

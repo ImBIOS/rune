@@ -33,6 +33,8 @@ pub(crate) struct Live<S: 'static> {
     pub(super) header: Option<&'static str>,
     /// Groups whose stories the list hides, until the playground closes.
     pub(super) folded: Vec<&'static str>,
+    /// The keyboard is on the open story's side controls, which take keys.
+    pub(super) side_active: bool,
     pub(super) scene: Option<Box<Stage<S>>>,
     pub(super) owned: Vec<Option<Box<dyn Any>>>,
     pub(super) controls: Controls,
@@ -78,6 +80,7 @@ impl<S: 'static> Live<S> {
             selected: 0,
             header: None,
             folded: Vec::new(),
+            side_active: false,
             scene: None,
             controls: Controls,
             dark: None,

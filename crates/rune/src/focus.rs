@@ -187,6 +187,7 @@ impl<S: 'static> Runtime<S> {
             self.last_focused = self.focused.clone();
         }
         self.keyboard_focus = keyboard;
+        self.sync_side_focus();
         changed
     }
     pub(super) fn sync_requested_focus(&mut self, nodes: &mut Vec<Node>) -> bool {

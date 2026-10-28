@@ -59,6 +59,42 @@ impl<S: 'static> Live<S> {
         })
     }
 
+    /// Whether the open story's side controls take keys: `Story::side_keys`, or
+    /// `Playground::side_keys` for a scene.
+    pub(super) fn side_keys(&self) -> bool {
+        match (&self.scene, self.own()) {
+            (Some(_), _) => self.sides.iter().any(|(s, side)| *s == self.selected && matches!(side, Side::Keys(..))),
+            (None, Some((own, _))) => own.side_keys(),
+            (None, None) => false,
+        }
+    }
+
+    /// Keys while the keyboard is on the open story's side controls that take keys: true when
+    /// the story's hook took `ev`, or it's ←, which stays rather than leaving.
+    pub(crate) fn side_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if !self.open { return false; }
+        let took = if let Some(scene) = &mut self.scene {
+            let key = self.sides.iter().find_map(|(s, side)| match side {
+                Side::Keys(_, key) if *s == self.selected => Some(key),
+                _ => None,
+            });
+            key.is_some_and(|key| key(&mut scene.state, ev, tx))
+        } else {
+            let at = self.selected.checked_sub(self.scenes.len());
+            match at.and_then(|i| Some((self.pages.get(i)?, self.owned.get_mut(i)?.as_mut()?))) {
+                Some((Page { kind: Kind::Own(own), .. }, stage)) => own.side_key(stage.as_mut(), ev, tx),
+                _ => false,
+            }
+        };
+        took || ev.key == Key::Left
+    }
+
+    /// Notes whether the keyboard is on the open story's side controls, which their view
+    /// shows; true when that changed.
+    pub(crate) fn set_side_active(&mut self, active: bool) -> bool {
+        std::mem::replace(&mut self.side_active, active) != active
+    }
+
     /// What the open story's trigger on `c` asks for, as its letter does: R replays.
     pub(super) fn trigger_request(&self, c: char) -> Option<Request> {
         self.triggers().iter().any(|(k, _)| *k == c).then_some(if c == 'r' { Request::Replay } else { Request::Trigger(c) })

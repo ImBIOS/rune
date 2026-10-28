@@ -120,6 +120,14 @@ impl<S: 'static> Runtime<S> {
         if self.playground_typing() && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
         let Some(playground) = &self.playground else { return false };
         if !playground.is_open() || self.focused_input().is_some() || self.focus_on_stage() { return false; }
+        if self.on_side_keys() {
+            if matches!(ev.key, crate::Key::Escape | crate::Key::Tab) {
+                self.set_focus(None, true);
+                return true;
+            }
+            if self.playground.as_mut().is_some_and(|p| p.side_key(ev, one)) { return true; }
+        }
+        let Some(playground) = &self.playground else { return false };
         let side = self.playground_side();
         let at = self.focused.as_deref().filter(|_| !self.hover_focus).and_then(|f| side.iter().position(|p| p == f));
         match playground.nav(ev, at.is_some()) {
@@ -151,6 +159,19 @@ impl<S: 'static> Runtime<S> {
     /// Whether the stage's `on_key` gets every key first, through `playground_nav`.
     pub(super) fn playground_typing(&self) -> bool {
         self.playground.as_ref().is_some_and(|p| p.typing(&self.state))
+    }
+
+    /// The keyboard is on the open story's side controls that take keys (`Story::side_keys`),
+    /// whose slot is focusable only then.
+    fn on_side_keys(&self) -> bool {
+        !self.hover_focus && self.focused_index().is_some_and(|i| self.nodes[i].key.as_deref().is_some_and(|k| k.starts_with("playground-slot-")))
+    }
+
+    /// Tells the playground whether the keyboard is on its side controls that take keys, so
+    /// their view can mark what the keys move; a change rebuilds the view.
+    pub(super) fn sync_side_focus(&mut self) {
+        let active = self.on_side_keys();
+        if self.playground.as_mut().is_some_and(|p| p.set_side_active(active)) { self.dirty = true; }
     }
 
     /// The paths of the focusable controls in the playground's side column, in order.

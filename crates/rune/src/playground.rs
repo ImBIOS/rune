@@ -71,7 +71,8 @@ pub(crate) use testing::stage_element;
 /// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
 /// toggles it, as a click on it does; groups stay folded until the playground closes. R
 /// replays the story from the start, 1 to 9 pick its variant, a trigger's letter runs it, → or Tab move into the side
-/// column (↑↓ inside it, ←, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
+/// column (↑↓ inside it, ←, Tab or Esc back out; side controls from `side_keys` get keys
+/// first, and only Tab and Esc leave them), and Esc or ⌘⇧D go back to the app. They come
 /// before the stage's `AppSpec::on_key`, except Esc, which the stage gets first. A focused
 /// text field keeps all its keys, and so does an element focused in the stage, until Esc.
 pub struct Playground<S: 'static> {
@@ -163,6 +164,13 @@ impl<S: 'static> Playground<S> {
         self
     }
 
+    /// [`Playground::side`] for controls that take keys, for the scene named `scene`. See
+    /// [`Story::side_keys`].
+    pub fn side_keys(mut self, scene: &'static str, view: impl Fn(&S, bool, &mut Cx<S>) -> El + 'static, key: impl Fn(&mut S, &KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.sides.push((scene, Side::Keys(Box::new(view), Box::new(key))));
+        self
+    }
+
     /// Which of `AppSpec::scenes` the list shows, by name: `|name| name.contains('/')` keeps
     /// ungrouped scenes to `--scene`. By default, all of them.
     pub fn scenes(mut self, show: fn(&str) -> bool) -> Self {
@@ -240,11 +248,18 @@ impl<S: 'static> Playground<S> {
     }
 }
 
-/// A scene's side column view, from [`Playground::side`] or [`Playground::side_real`].
+/// A scene's side column view, from [`Playground::side`], [`Playground::side_real`] or
+/// [`Playground::side_keys`].
 enum Side<S: 'static> {
     Stage(fn(&S, &mut Cx<S>) -> El),
     Real(fn(&S, &S, &mut Cx<S>) -> El),
+    Keys(SideView<S>, SideKey<S>),
 }
+
+/// A side column view that takes keys, told whether the keyboard is on it.
+type SideView<X> = Box<dyn Fn(&X, bool, &mut Cx<X>) -> El>;
+/// Its keys: true when it took one.
+type SideKey<X> = Box<dyn Fn(&mut X, &KeyEvent, &mut Tx) -> bool>;
 
 struct Page<S: 'static> {
     name: &'static str,

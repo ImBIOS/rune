@@ -49,9 +49,14 @@ fn style(cx: &Cx<State>) -> Style {
     if cx.system_dark() { Style::dark() } else { Style::light() }
 }
 
-/// The playground's side column: the same knobs as rows, filling its width.
-fn story_side(s: &State, cx: &mut Cx<State>) -> El {
-    rune_knobs::inline(&s.knobs, GROUPS, style(cx), |s: &mut State| &mut s.knobs, false)
+/// The playground's side column: the same knobs as rows, filling its width. With the keyboard
+/// on them (→ from the list), ↑↓ pick a knob and ←→ step it.
+fn story_side(s: &State, active: bool, cx: &mut Cx<State>) -> El {
+    rune_knobs::inline(&s.knobs, GROUPS, style(cx), |s: &mut State| &mut s.knobs, active)
+}
+
+fn playground() -> Playground<State> {
+    Playground::new().story(Story::new("Card/Knobs", State::default, page).side_keys(story_side, rune_knobs::side_key(GROUPS, |s: &mut State| &mut s.knobs)))
 }
 
 fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -68,13 +73,43 @@ fn main() {
         on_key: Some(on_key),
         ..AppSpec::new("Knobs", (820.0, 520.0), State::default, view)
     };
-    App::new(spec).playground(Playground::<State>::new().story(Story::new("Card/Knobs", State::default, page).side(story_side))).run();
+    App::new(spec).playground(playground()).run();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rune::{Env, Key, Mods, Runtime};
+    use rune_knobs::Knob;
+
+    fn press(rt: &mut Runtime<State>, key: Key, shift: bool) {
+        rt.key(KeyEvent { key, mods: Mods { shift, ..Mods::default() } });
+        rt.frame(1.0 / 60.0);
+    }
+
+    fn knob(rt: &Runtime<State>, d: &Knob) -> f32 {
+        rt.playground_state::<State>().map(|s| s.knobs.get(d)).unwrap()
+    }
+
+    #[test]
+    fn in_the_playground_arrows_pick_and_step_the_side_columns_knobs() {
+        let spec = AppSpec::new("Knobs", (820.0, 520.0), State::default, view);
+        let mut rt = App::new(spec).playground(playground()).headless_runtime((820.0, 520.0), Env::new(true, 1.0));
+        rt.open_playground("card-knobs", None);
+        press(&mut rt, Key::Right, false);
+        press(&mut rt, Key::Right, false);
+        assert!((knob(&rt, &RADIUS) - 14.32).abs() < 1e-4, "→ steps the first knob, the radius");
+        press(&mut rt, Key::Down, false);
+        press(&mut rt, Key::Right, true);
+        assert_eq!(knob(&rt, &PAD), 34.0, "↓ picks the padding, and ⇧→ steps it ten");
+        press(&mut rt, Key::Left, false);
+        assert_eq!(knob(&rt, &PAD), 33.0, "← steps back rather than leaving");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("playground-slot-0") && e.focused), "the keyboard is on the knobs");
+        press(&mut rt, Key::Escape, false);
+        press(&mut rt, Key::Down, false);
+        assert_eq!(knob(&rt, &PAD), 33.0, "after Esc, ↓ moves in the list again");
+        assert_eq!(rt.state.knobs.get(&RADIUS), RADIUS.default, "the real state is untouched");
+    }
 
     #[test]
     fn cmd_shift_k_opens_the_panel_and_a_knob_changes_the_card() {

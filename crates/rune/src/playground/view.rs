@@ -156,7 +156,11 @@ impl<S: 'static> Live<S> {
                 .child(text(self.name(i)).font(type_::TITLE).color(t.text).truncate())
         });
         // Keyed by story, not generation, so a replay keeps the keyboard on the control it's on.
-        let slot = self.side_slot(app, cx).map(|slot| el().key(format!("playground-slot-{i}")).w_full().child(slot));
+        let slot = self.side_slot(app, cx).map(|slot| {
+            let slot = el().key(format!("playground-slot-{i}")).w_full().child(slot);
+            // Its view marks what the keys move, so no ring.
+            if self.side_keys() { slot.focusable(true).no_focus_ring() } else { slot }
+        });
         let variants = self.variants();
         let at = self.variant_at();
         let picker = (!variants.is_empty()).then(|| {
@@ -201,8 +205,8 @@ impl<S: 'static> Live<S> {
             .child(text(hint).key("playground-hint").font(type_::SECTION).color(t.text_secondary).px(4.0).wrap())
     }
 
-    /// The app's controls for the open story, from `Playground::side` or `Story::side`, acting
-    /// on its stage state.
+    /// The app's controls for the open story, from `Playground::side` or `Story::side` (or
+    /// their `side_keys`), acting on its stage state.
     fn side_slot(&self, app: &S, cx: &mut Cx<S>) -> Option<El> {
         if let Some(scene) = &self.scene {
             let (_, view) = self.sides.iter().find(|(s, _)| *s == self.selected)?;
@@ -210,13 +214,14 @@ impl<S: 'static> Live<S> {
             let root = match view {
                 Side::Stage(view) => call(*view, &scene.state, &mut stage),
                 Side::Real(view) => view(&scene.state, app, &mut stage),
+                Side::Keys(view, _) => view(&scene.state, self.side_active, &mut stage),
             };
             cx.absorb(stage);
             return Some(root);
         }
         let (own, stage) = self.own()?;
         let mut unit = cx.retype::<()>();
-        let root = own.side(stage, &mut unit);
+        let root = own.side(stage, self.side_active, &mut unit);
         cx.absorb(unit);
         root
     }

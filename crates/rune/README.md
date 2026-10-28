@@ -2269,6 +2269,13 @@ App::new(spec).playground(
   `.shortcut(None)` turns the shortcut off; `tx.open_playground()` opens it from the app.
   `Playground::typing(|s| ..)` gives the stage's `on_key` every key first, for a field drawn in
   it.
+- **Keys for side controls.** `Story::side_keys(view, key)` (or `Playground::side_keys(scene,
+  view, key)`) is `.side(view)` for controls that take keys. → or Tab from the list puts the
+  keyboard on them, `view` gets `active: true` while it's there to mark what the keys move,
+  and `key` gets each key first. Esc and Tab always leave; ← doesn't. Keys it leaves work as
+  elsewhere in the side column. For knobs it's one line:
+  `.side_keys(|s, active, cx| rune_knobs::inline(&s.knobs, GROUPS, style(cx), lens, active), rune_knobs::side_key(GROUPS, lens))`,
+  where ↑↓ pick a knob and ←→ step it.
 - **The real state.** `Playground::fresh(|real| ..)` starts scenes from the real state and
   `Story::from_real(name, |real| .., view)` derives a story's state from it, each time it's
   made. `Playground::keep(|stage, real| ..)` copies a scene's stage back before R, a switch or
@@ -2331,6 +2338,7 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | the story's keys (`Action`s)                | `Story::trigger(key, label, step)`; `'r'` runs after each replay       |
 | timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
 | the knobs column                            | `.side(view)`: `rune_knobs::inline` fills the column's width; `actions` fits it, up to 300 pt |
+| keys for the knobs                          | `.side_keys(view, rune_knobs::side_key(groups, lens))`: ↑↓ pick a knob, ←→ step it, Esc leaves |
 | a choice knob flipped with 1–9              | `Story::variant(name, apply)`; 1–9 pick, and picking remakes the state |
 | setup from the app's state                  | `Story::from_real(name, derive, view)`, or `Playground::fresh`         |
 | collapsible groups                          | built in: click a header, or ← → ↵ on it                               |
@@ -2340,9 +2348,8 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | a background poll                           | `Story::poll`                                                          |
 
 What it doesn't do yet, if the app's storybook relies on it: keep groups folded after the
-playground closes or show counts beside the headers, mark stories that have motion, give a story a scrolling page stage that bleeds to the edges, or hand the keys
-to the knobs (`Knobs::panel_key`); → moves focus into the side column's controls, but not
-further. Keep those in the app until they land here.
+playground closes or show counts beside the headers, mark stories that have motion, or give a story a scrolling page stage that bleeds to the edges. Keep those in the app until
+they land here.
 
 ## Live Rust editing (desktop development)
 

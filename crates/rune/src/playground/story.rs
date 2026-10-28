@@ -21,14 +21,16 @@ pub struct Story<P: 'static> {
     poll: Option<fn(&mut P, f64, &mut Tx) -> bool>,
     frame: Option<(f32, f32)>,
     triggers: Vec<Trigger<P>>,
-    side: Option<fn(&P, &mut Cx<P>) -> El>,
+    /// Its view, told whether the keyboard is on it.
+    side: Option<SideView<P>>,
+    side_key: Option<SideKey<P>>,
     variants: Vec<(&'static str, fn(&mut P))>,
 }
 
 impl<P: 'static> Story<P> {
     /// `name` may be a `"Group/Name"` path.
     pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None, variants: Vec::new() }
+        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None, side_key: None, variants: Vec::new() }
     }
 
     /// A story whose state `derive` makes from the app's real state, each time it's made: when
@@ -63,7 +65,26 @@ impl<P: 'static> Story<P> {
     /// The app's own controls for this story, at the top of the side column, drawn from and
     /// acting on its state: knobs, say.
     pub fn side(mut self, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        self.side = Some(view);
+        self.side = Some(Box::new(move |p, _, cx| call(view, p, cx)));
+        self.side_key = None;
+        self
+    }
+
+    /// [`Story::side`] for controls that take keys: knobs, say. → or Tab puts the keyboard on
+    /// them, and `view` gets `true` while it's there, to mark what the keys move. `key` gets
+    /// each key first, and returns true when it took it. Esc and Tab always leave, and ←
+    /// doesn't. Keys it leaves do what they do anywhere in the side column: ↑ and ↓ move on to
+    /// the controls below, and letters run triggers.
+    ///
+    /// ```ignore
+    /// .side_keys(
+    ///     |s, active, cx| rune_knobs::inline(&s.knobs, GROUPS, style(cx), |s: &mut State| &mut s.knobs, active),
+    ///     rune_knobs::side_key(GROUPS, |s: &mut State| &mut s.knobs),
+    /// )
+    /// ```
+    pub fn side_keys(mut self, view: impl Fn(&P, bool, &mut Cx<P>) -> El + 'static, key: impl Fn(&mut P, &KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.side = Some(Box::new(view));
+        self.side_key = Some(Box::new(key));
         self
     }
 
@@ -105,7 +126,12 @@ pub(super) trait OwnStory {
     fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any;
     fn state_ref<'a>(&self, stage: &'a dyn Any) -> &'a dyn Any;
     fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El;
-    fn side(&self, stage: &dyn Any, cx: &mut Cx<()>) -> Option<El>;
+    /// `active`: the keyboard is on it.
+    fn side(&self, stage: &dyn Any, active: bool, cx: &mut Cx<()>) -> Option<El>;
+    /// Whether its side controls take keys.
+    fn side_keys(&self) -> bool;
+    /// Offers `ev` to its side controls; true when they took it.
+    fn side_key(&self, stage: &mut dyn Any, ev: &KeyEvent, tx: &mut Tx) -> bool;
     fn poll(&self, stage: &mut dyn Any, t: f64, tx: &mut Tx) -> bool;
     fn polls(&self, stage: &dyn Any) -> bool;
     /// Queues the trigger on `key` at `now`; false when there's none.
@@ -138,12 +164,18 @@ impl<P: 'static> OwnStory for Story<P> {
         cx.absorb(own);
         root
     }
-    fn side(&self, stage: &dyn Any, cx: &mut Cx<()>) -> Option<El> {
-        let side = self.side?;
+    fn side(&self, stage: &dyn Any, active: bool, cx: &mut Cx<()>) -> Option<El> {
+        let side = self.side.as_ref()?;
         let mut own = cx.retype::<P>();
-        let root = call(side, &Self::stage(stage).state, &mut own);
+        let root = side(&Self::stage(stage).state, active, &mut own);
         cx.absorb(own);
         Some(root)
+    }
+    fn side_keys(&self) -> bool {
+        self.side_key.is_some()
+    }
+    fn side_key(&self, stage: &mut dyn Any, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        self.side_key.as_ref().is_some_and(|key| key(&mut Self::stage_mut(stage).state, ev, tx))
     }
     fn poll(&self, stage: &mut dyn Any, t: f64, tx: &mut Tx) -> bool {
         let stage = Self::stage_mut(stage);
