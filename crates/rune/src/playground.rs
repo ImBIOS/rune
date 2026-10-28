@@ -25,6 +25,7 @@ const BAND: f32 = 28.0;
 const ROW: f32 = 28.0;
 const CONTROL: f32 = 24.0;
 
+mod folds;
 mod live;
 mod nav;
 mod open;
@@ -35,6 +36,7 @@ mod variants;
 mod view;
 
 pub(crate) use live::Live;
+use folds::Folds;
 use nav::Row;
 pub use open::slug;
 pub(crate) use stage::call;
@@ -70,7 +72,8 @@ pub(crate) use testing::stage_element;
 ///
 /// Keys, while it's open: ↑↓ move along the list, group headers included, and J K between
 /// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
-/// toggles it, as a click on it does; groups stay folded until the playground closes. R
+/// toggles it, as a click on it does; groups stay folded while the app runs (see
+/// [`Playground::folds`] to keep them longer). R
 /// replays the story from the start, 1 to 9 pick its variant, a trigger's letter runs it, → or Tab move into the side
 /// column (↑↓ inside it, ←, Tab or Esc back out; side controls from `side_keys` get keys
 /// first, and only Tab and Esc leave them), and Esc or ⌘⇧D go back to the app. They come
@@ -90,6 +93,7 @@ pub struct Playground<S: 'static> {
     variants: Vec<(&'static str, &'static str, Variant<S>)>,
     typing: Option<fn(&S) -> bool>,
     dark: Option<fn(&S) -> bool>,
+    folds: Folds,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -116,6 +120,7 @@ impl<S: 'static> Playground<S> {
             variants: Vec::new(),
             typing: None,
             dark: None,
+            folds: Folds::default(),
         }
     }
 

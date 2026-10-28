@@ -2269,6 +2269,8 @@ App::new(spec).playground(
   its first variant, and digits it has no variant for reach the stage.
 - **Keys.** ↑↓ walk the group headers and the stories that show, J K skip the headers, ⌘↑ ⌘↓ go
   to the first and last. ← → ↵ on a header fold or unfold its group, as a click on it does.
+  Folded groups stay folded while the app runs; `Playground::folds(load, save)` keeps them from
+  one run to the next (in `rune::prefs::Prefs`, say).
   → or Tab move into the side column and ← out of it, and Esc (after the stage has had it) or
   ⌘⇧D leaves. The side column lists each variant's and trigger's key and ends with a hint.
   `.shortcut(None)` turns the shortcut off; `tx.open_playground()` opens it from the app.
@@ -2347,15 +2349,15 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | keys for the knobs                          | `.side_keys(view, rune_knobs::side_key(groups, lens))`: ↑↓ pick a knob, ←→ step it, Esc leaves |
 | a choice knob flipped with 1–9              | `Story::variant(name, apply)`; 1–9 pick, and picking remakes the state |
 | setup from the app's state                  | `Story::from_real(name, derive, view)`, or `Playground::fresh`         |
-| collapsible groups                          | built in: click a header, or ← → ↵ on it                               |
+| collapsible groups                          | built in: click a header, or ← → ↵ on it; `Playground::folds(load, save)` keeps them between runs |
 | a key sheet                                 | built in: the side column shows each key beside its row, and a hint    |
 | open, leave, Esc, ⌘⇧D                       | built in: ⌘⇧D, Esc, Back, and `tx.open_playground()`                   |
 | a link to a story                           | `rune::playground::slug(path)`, and `tx.open_playground_at(slug, variant)` from `App::on_open_url` |
 | a background poll                           | `Story::poll`                                                          |
 
-What it doesn't do yet, if the app's storybook relies on it: keep groups folded after the
-playground closes or show counts beside the headers, mark stories that have motion, or give a story a scrolling page stage that bleeds to the edges. Keep those in the app until
-they land here.
+What it doesn't do yet, if the app's storybook relies on it: show counts beside the headers,
+mark stories that have motion, or give a story a scrolling page stage that bleeds to the edges.
+Keep those in the app until they land here.
 
 ## Live Rust editing (desktop development)
 

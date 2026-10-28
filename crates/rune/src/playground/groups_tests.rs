@@ -36,7 +36,7 @@ fn left_right_and_return_fold_the_selected_header() {
 }
 
 #[test]
-fn folding_the_open_storys_group_selects_its_header_until_the_playground_closes() {
+fn folding_the_open_storys_group_selects_its_header_and_stays_folded_after_close() {
     let mut rt = runtime(Some(Some("Fade".into())));
     tap(&mut rt, "playground-group-2");
     assert_eq!((header(&rt), selected(&rt)), (Some("Motion"), 5));
@@ -46,8 +46,8 @@ fn folding_the_open_storys_group_selects_its_header_until_the_playground_closes(
     escape(&mut rt);
     rt.update(|_, tx| tx.open_playground());
     rt.frame(DT);
-    assert!(shown(&rt, 2) && shown(&rt, 5), "reopened, nothing is folded");
-    assert_eq!(header(&rt), None);
+    assert!(!shown(&rt, 2) && !shown(&rt, 5), "reopened, the group is still folded");
+    assert_eq!((header(&rt), selected(&rt)), (Some("Motion"), 5), "and its header stands in for the story");
 }
 
 #[test]

@@ -14,3 +14,7 @@
   `side_real` take any `Fn` (or `FnOnce` for a step) where they took a `fn`, so a story table
   can build its stories in a loop. Code passing fns compiles unchanged. `Story::trigger_tx` and
   `Playground::trigger_tx` take a step that needs only the `Tx`.
+- **Folded playground groups stay folded after it closes**, for as long as the app runs, where
+  they used to unfold on close. `Playground::folds(load, save)` keeps them from one run to the
+  next: `load` runs once as the playground first opens, and `save` gets the folded groups' names
+  on each change.

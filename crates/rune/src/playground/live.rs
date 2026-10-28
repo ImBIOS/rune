@@ -33,6 +33,8 @@ pub(crate) struct Live<S: 'static> {
     pub(super) header: Option<&'static str>,
     /// Groups whose stories the list hides, until the playground closes.
     pub(super) folded: Vec<&'static str>,
+    /// [`Playground::folds`].
+    pub(super) folds: Folds,
     /// The keyboard is on the open story's side controls, which take keys.
     pub(super) side_active: bool,
     pub(super) scene: Option<Box<Stage<S>>>,
@@ -56,7 +58,7 @@ pub(crate) struct Live<S: 'static> {
 
 impl<S: 'static> Live<S> {
     pub(super) fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep, variants, typing, dark: app_dark } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep, variants, typing, dark: app_dark, folds } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
@@ -80,6 +82,7 @@ impl<S: 'static> Live<S> {
             selected: 0,
             header: None,
             folded: Vec::new(),
+            folds,
             side_active: false,
             scene: None,
             controls: Controls,
@@ -184,6 +187,7 @@ impl<S: 'static> Live<S> {
     /// Applies the requests handlers made since the last commit; true when anything changed.
     pub(crate) fn apply(&mut self, clock: f64, real: &mut S) -> bool {
         self.now = clock;
+        self.load_folds();
         let mut changed = false;
         for request in std::mem::take(&mut self.pending) {
             changed = true;
@@ -218,6 +222,10 @@ impl<S: 'static> Live<S> {
                 Request::Fold(group, fold) => self.fold(group, fold),
             }
         }
+        // Opened on a story whose group is folded, the header stands in for its row.
+        if self.open && self.header.is_none() && self.selected < self.count() && self.folded.contains(&self.group(self.selected)) {
+            self.header = Some(self.group(self.selected));
+        }
         changed
     }
 
@@ -225,11 +233,11 @@ impl<S: 'static> Live<S> {
         let folded = self.folded.contains(&group);
         match fold.unwrap_or(!folded) {
             true if !folded => {
-                self.folded.push(group);
+                self.refold(|f| f.push(group));
                 // The selected story's row goes, so its header takes the selection.
                 if self.header.is_none() && self.selected < self.count() && self.group(self.selected) == group { self.header = Some(group); }
             }
-            false => self.folded.retain(|g| *g != group),
+            false => self.refold(|f| f.retain(|g| *g != group)),
             true => {}
         }
     }
@@ -239,7 +247,7 @@ impl<S: 'static> Live<S> {
         self.header = None;
         if i < self.count() {
             let group = self.group(i);
-            self.folded.retain(|g| *g != group);
+            self.refold(|f| f.retain(|g| *g != group));
         }
     }
 
@@ -259,7 +267,6 @@ impl<S: 'static> Live<S> {
         self.keep(real);
         self.open = false;
         self.header = None;
-        self.folded.clear();
         self.variant.iter_mut().for_each(|v| *v = 0);
         self.scene = None;
         self.owned.iter_mut().for_each(|o| *o = None);
