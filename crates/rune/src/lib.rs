@@ -156,6 +156,7 @@ mod window_frame;
 mod frame_clock;
 mod frame_encoded;
 pub use frame_encoded::{FrameEncoded, FrameOutcome};
+pub use input_time::last_input;
 mod present_time;
 mod secure_input;
 pub mod clipboard;

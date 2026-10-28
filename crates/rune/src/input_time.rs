@@ -8,7 +8,13 @@ use crate::time::Instant;
 
 thread_local! {
     static CURRENT: Cell<Option<Instant>> = const { Cell::new(None) };
+    static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
 }
+
+/// When this thread's windows last took an input event (a key, the pointer, a wheel or a
+/// gesture) from the platform: the moment it was dispatched, not its `Tx::input_time`, so
+/// input dispatched after a frame is always later than that frame. `None` before any.
+pub fn last_input() -> Option<Instant> { LAST.with(Cell::get) }
 
 /// The arrival time of the input being dispatched on this thread, if any.
 pub(crate) fn current() -> Option<Instant> { CURRENT.with(Cell::get) }
@@ -54,6 +60,7 @@ impl Kind {
 /// timestamp of the `NSEvent` AppKit is dispatching, when it is that kind of event; else now.
 pub(crate) fn arrived(event: &winit::event::WindowEvent) -> Option<Scope> {
     let kind = Kind::of(event)?;
+    LAST.with(|c| c.set(Some(Instant::now())));
     Some(scope(Some(native(kind).unwrap_or_else(Instant::now))))
 }
 

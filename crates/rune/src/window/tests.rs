@@ -217,7 +217,7 @@ struct CompHost {
     comp_animates: std::rc::Rc<std::cell::Cell<bool>>,
     frames: u32,
     /// Called where `draw` calls it.
-    reports: crate::frame_encoded::FrameReports,
+    reports: crate::frame_encoded::FrameReports<u32>,
 }
 
 impl CompHost {

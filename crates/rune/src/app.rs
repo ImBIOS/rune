@@ -57,6 +57,7 @@ pub struct App<S: 'static> {
     pub(crate) on_window: Option<OnWindow>,
     pub(crate) on_ready: Option<OnWindow>,
     pub(crate) on_frame_encoded: Option<crate::frame_encoded::OnFrameEncoded>,
+    pub(crate) on_frame_drawn: Option<crate::frame_encoded::OnFrameDrawn<S>>,
     pub(crate) macos_window: crate::MacWindowOptions,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
@@ -93,6 +94,7 @@ impl<S: 'static> App<S> {
             on_window: None,
             on_ready: None,
             on_frame_encoded: None,
+            on_frame_drawn: None,
             macos_window: crate::MacWindowOptions::default(),
             compositor: None,
             window_options: crate::WindowOptions::default(),
@@ -343,6 +345,16 @@ impl<S: 'static> App<S> {
     /// overlays and the web never call it.
     pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
         self.on_frame_encoded = Some(Box::new(f));
+        self
+    }
+
+    /// Runs on the UI thread after each `Drawn` frame of the app's window, with the runtime as
+    /// that frame presented it (`Runtime::elements`, `Runtime::state`), for an app that watches
+    /// its own motion. Pair it with [`last_input`](crate::last_input) to tell motion the user
+    /// caused from motion they didn't. Like `on_frame_encoded`, it changes nothing about when
+    /// or what the window draws, and only desktop windows call it.
+    pub fn on_frame_drawn(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
+        self.on_frame_drawn = Some(Box::new(f));
         self
     }
 

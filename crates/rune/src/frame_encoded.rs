@@ -8,6 +8,9 @@ use crate::time::Instant;
 /// `App::on_frame_encoded`'s hook.
 pub(crate) type OnFrameEncoded = Box<dyn FnMut(&FrameEncoded)>;
 
+/// `App::on_frame_drawn`'s hook.
+pub(crate) type OnFrameDrawn<S> = Box<dyn FnMut(&crate::Runtime<S>)>;
+
 /// One frame a window ran, as `App::on_frame_encoded` reports it.
 #[derive(Clone, Debug)]
 pub struct FrameEncoded {
@@ -52,10 +55,13 @@ impl FrameEncoded {
     pub fn presents_at(&self) -> Option<Instant> { self.presents_at }
 }
 
-/// A window's hook and the count it numbers reports with. Without a hook every call is one
+/// A window's hooks and the count it numbers reports with. Without a hook every call is one
 /// `Option` check and nothing else, so reporting never changes how the window draws.
-#[derive(Default)]
-pub(crate) struct FrameReports(Option<Reporter>);
+pub(crate) struct FrameReports<S: 'static>(Option<Reporter>, Option<OnFrameDrawn<S>>);
+
+impl<S: 'static> Default for FrameReports<S> {
+    fn default() -> Self { Self(None, None) }
+}
 
 struct Reporter {
     hook: OnFrameEncoded,
@@ -63,9 +69,14 @@ struct Reporter {
     seq: u64,
 }
 
-impl FrameReports {
+impl<S: 'static> FrameReports<S> {
     pub(crate) fn new(hook: Option<OnFrameEncoded>, window: Option<&str>) -> Self {
-        Self(hook.map(|hook| Reporter { hook, window: window.map(Rc::from), seq: 0 }))
+        Self(hook.map(|hook| Reporter { hook, window: window.map(Rc::from), seq: 0 }), None)
+    }
+
+    pub(crate) fn inspecting(mut self, drawn: Option<OnFrameDrawn<S>>) -> Self {
+        self.1 = drawn;
+        self
     }
 
     /// The time to report a `Drawn` frame at, taken only when there's a hook.
@@ -74,6 +85,11 @@ impl FrameReports {
     /// A frame encoded at `at` (from `stamp`).
     pub(crate) fn drawn(&mut self, at: Option<Instant>, presents_at: Option<Instant>) {
         if let Some(at) = at { self.report(FrameOutcome::Drawn, at, presents_at); }
+    }
+
+    /// After a `Drawn` frame: `App::on_frame_drawn` reads the runtime as it presented.
+    pub(crate) fn inspect(&mut self, rt: &crate::Runtime<S>) {
+        if let Some(hook) = &mut self.1 { hook(rt); }
     }
 
     pub(crate) fn unchanged(&mut self, presents_at: Option<Instant>) {
