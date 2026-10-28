@@ -7,8 +7,7 @@ use super::*;
 pub(crate) fn element_rect<S: 'static>(rt: &Runtime<S>, key: &str, scale: f32, (w, h): (u32, u32)) -> [u32; 4] {
     let all = rt.elements();
     let named = |i: &usize| !all[*i].exiting && (all[*i].key.as_deref() == Some(key) || all[*i].path == key);
-    let in_stage = |i: &usize| std::iter::successors(Some(*i), |&j| all[j].parent).any(|j| all[j].key.as_deref().is_some_and(crate::playground::is_stage));
-    let found = (0..all.len()).filter(named).find(in_stage).or_else(|| (0..all.len()).find(named));
+    let found = crate::playground::stage_element(&all, key).or_else(|| (0..all.len()).find(named));
     let Some(i) = found else { die(&format!("--crop {key}: no element has that key or path")) };
     let [x, y, rw, rh] = all[i].rect;
     let px = |v: f32, max: u32, round: fn(f32) -> f32| (round(v * scale).max(0.0) as u32).min(max);

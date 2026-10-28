@@ -20,16 +20,19 @@ impl<S: 'static> Live<S> {
 
     /// `--variant`: story `name` (else the first) opens on the variant `variant` names, by
     /// number from 1 or by name.
-    pub(super) fn pick(&mut self, name: Option<&str>, variant: &str) {
+    pub(super) fn pick(&mut self, name: Option<&str>, variant: &str) -> Result<(), String> {
         let i = name.and_then(|n| self.find(n)).unwrap_or(self.selected);
         let names = self.variants_of(i);
         let by_number = variant.parse::<usize>().ok().filter(|n| (1..=names.len()).contains(n)).map(|n| n - 1);
         let by_name = || names.iter().position(|n| *n == variant).or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(variant)));
         match by_number.or_else(by_name) {
             Some(n) => self.variant[i] = n,
-            None if names.is_empty() => crate::tooling::die(&format!("{:?} has no variants", self.path(i))),
-            None => crate::tooling::die(&format!("no variant {variant:?} of {:?}; it has: {}", self.path(i), names.join(", "))),
+            None if names.is_empty() => return Err(format!("{:?} has no variants", self.path(i))),
+            None => return Err(format!("no variant {variant:?} of {:?}; it has: {}", self.path(i), names.join(", "))),
         }
+        // A story's stage outlives a switch away; made again, it takes the variant.
+        if let Some(page) = i.checked_sub(self.scenes.len()) && let Some(stage) = self.owned.get_mut(page) { *stage = None; }
+        Ok(())
     }
 
     /// The open story's variant, by index, of those it has.

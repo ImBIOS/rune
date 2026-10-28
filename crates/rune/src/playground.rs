@@ -27,6 +27,7 @@ const CONTROL: f32 = 24.0;
 mod nav;
 mod stage;
 mod story;
+mod testing;
 mod variants;
 mod view;
 
@@ -36,6 +37,7 @@ pub use stage::{Play, Step};
 use stage::{Stage, Trigger, trigger};
 pub use story::Story;
 use story::OwnStory;
+pub(crate) use testing::stage_element;
 
 /// A storybook for one window, given to [`App::playground`](crate::App::playground):
 ///
@@ -359,12 +361,8 @@ pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<
     if open.is_none() && (!windowed || hidden_by_env()) { return; }
     let mut live = Live::new(playground, spec, windowed && cfg!(target_os = "macos"));
     if let Some(name) = open {
-        if let Some(name) = &name && live.find(name).is_none() {
-            let names: Vec<_> = live.order.iter().map(|&i| live.path(i)).collect();
-            crate::tooling::die(&format!("no story {name:?} in the playground; it has: {}", names.join(", ")));
-        }
-        if let Some(variant) = variant { live.pick(name.as_deref(), &variant); }
-        live.pending.push(Request::Open(name));
+        let request = live.open_at(name.as_deref(), variant.as_deref()).unwrap_or_else(|e| crate::tooling::die(&e));
+        live.pending.push(request);
     }
     rt.playground = Some(Box::new(live));
 }

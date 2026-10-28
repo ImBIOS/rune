@@ -23,8 +23,8 @@ impl<S: 'static> Live<S> {
         }
         if let Some(request) = letter.and_then(|c| self.variant_key(c)) { return Nav::Request(request); }
         // In the side column, Space presses the focused control.
-        if let Some(c) = letter && !(in_side && c == ' ') && self.triggers().iter().any(|(k, _)| *k == c) {
-            return Nav::Request(if c == 'r' { Request::Replay } else { Request::Trigger(c) });
+        if let Some(c) = letter && !(in_side && c == ' ') && let Some(request) = self.trigger_request(c) {
+            return Nav::Request(request);
         }
         if in_side { return Nav::Pass; }
         let rows = self.rows();
@@ -57,6 +57,11 @@ impl<S: 'static> Live<S> {
             Row::Header(g, _) => Request::Header(g),
             Row::Story(i) => Request::Select(i),
         })
+    }
+
+    /// What the open story's trigger on `c` asks for, as its letter does: R replays.
+    pub(super) fn trigger_request(&self, c: char) -> Option<Request> {
+        self.triggers().iter().any(|(k, _)| *k == c).then_some(if c == 'r' { Request::Replay } else { Request::Trigger(c) })
     }
 
     /// The list's rows: each group's header, then its stories unless it's folded.
