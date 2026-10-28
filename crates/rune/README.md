@@ -2227,9 +2227,22 @@ App::new(spec).playground(
   again, then runs the story's `'r'` trigger if it has one. `Play::after(secs, step)` queues
   follow-up steps on the runtime's logical clock, timed from when the previous step was due, so
   a replay runs the same every time, headless included. J and K can't be trigger keys.
-- **Keys.** ↑↓ or J K move between stories, ⌘↑ ⌘↓ go to the first and last, → or Tab move into
-  the side column, and Esc (after the stage has had it) or ⌘⇧D leaves.
+- **Variants.** `Story::variant(name, |p| ..)` and `Playground::variant(scene, name, |s| ..)` list
+  variants in the side column; 1–9 pick one, which makes the state again on it. A story starts on
+  its first variant, and digits it has no variant for reach the stage.
+- **Keys.** ↑↓ walk the group headers and the stories that show, J K skip the headers, ⌘↑ ⌘↓ go
+  to the first and last. ← → ↵ on a header fold or unfold its group, as a click on it does.
+  → or Tab move into the side column and ← out of it, and Esc (after the stage has had it) or
+  ⌘⇧D leaves. The side column lists each variant's and trigger's key and ends with a hint.
   `.shortcut(None)` turns the shortcut off; `tx.open_playground()` opens it from the app.
+  `Playground::typing(|s| ..)` gives the stage's `on_key` every key first, for a field drawn in
+  it.
+- **The real state.** `Playground::fresh(|real| ..)` starts scenes from the real state and
+  `Story::from_real(name, |real| .., view)` derives a story's state from it, each time it's
+  made. `Playground::keep(|stage, real| ..)` copies a scene's stage back before R, a switch or
+  Back, and `Tx::keep_playground()` runs it on demand, say from a `Playground::side_real` control
+  that draws from both states. `Playground::dark(|s| ..)` makes the chrome follow the app's own
+  light/dark setting. `Playground::scenes(|name| ..)` picks which scenes the list shows.
 - **Overlays.** `Story::overlay` draws an overlay's view in a dashed frame of its size, so it
   shows in the window and in headless renders.
 - **Off.** It's on in debug builds; `.enabled(bool)` overrides that and `RUNE_PLAYGROUND=0`
@@ -2251,15 +2264,18 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | the story's keys (`Action`s)                | `Story::trigger(key, label, step)`; `'r'` runs after each replay       |
 | timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
 | the knobs column                            | `.side(view)`, with `rune_knobs::inline` and `rune_knobs::actions` in it |
+| a choice knob flipped with 1–9              | `Story::variant(name, apply)`; 1–9 pick, and picking remakes the state |
+| setup from the app's state                  | `Story::from_real(name, derive, view)`, or `Playground::fresh`         |
+| collapsible groups                          | built in: click a header, or ← → ↵ on it                               |
+| a key sheet                                 | built in: the side column shows each key beside its row, and a hint    |
 | open, leave, Esc, ⌘⇧D                       | built in: ⌘⇧D, Esc, Back, and `tx.open_playground()`                   |
 | a background poll                           | `Story::poll`                                                          |
 
-What it doesn't do yet, if the app's storybook relies on it: fold groups (with the fold state
-saved, headers as cursor stops, ←/→/↵ to fold and counts beside them), mark stories that have
-motion, flip a story's first choice knob with 1–9 or re-run its setup when a choice changes,
-link to a story by slug, list its keys in a shortcut sheet, give a story a scrolling page stage
-that bleeds to the edges, or move the keyboard into the knobs (`Knobs::panel_key`). Keep those
-in the app until they land here.
+What it doesn't do yet, if the app's storybook relies on it: keep groups folded after the
+playground closes or show counts beside the headers, mark stories that have motion, link to a
+story by slug, give a story a scrolling page stage that bleeds to the edges, or hand the keys
+to the knobs (`Knobs::panel_key`); → moves focus into the side column's controls, but not
+further. Keep those in the app until they land here.
 
 ## Live Rust editing (desktop development)
 
