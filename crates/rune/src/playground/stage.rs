@@ -22,6 +22,13 @@ impl<X> Play<'_, X> {
         self.script.push((self.now + secs.max(0.0), step));
     }
 
+    /// Drops every step still queued on this stage, a loop's next one included, so a trigger
+    /// can take over from a running one; steps queued after it in this step still run. The
+    /// stage's state and its running animations are left alone.
+    pub fn clear(&mut self) {
+        self.script.clear();
+    }
+
     /// When this step was due, on the runtime's clock.
     pub fn now(&self) -> f64 {
         self.now

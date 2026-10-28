@@ -2255,7 +2255,10 @@ App::new(spec).playground(
 - **Triggers** are single-letter keys, listed beside the stage. R replays: it makes the state
   again, then runs the story's `'r'` trigger if it has one. `Play::after(secs, step)` queues
   follow-up steps on the runtime's logical clock, timed from when the previous step was due, so
-  a replay runs the same every time, headless included. J and K can't be trigger keys.
+  a replay runs the same every time, headless included. `Play::clear()` drops every step still
+  queued, a loop's next one included, so a trigger can take over from a running one:
+  `play.clear(); play.after(0.2, ..)` runs only the new steps. It leaves the state and running
+  animations alone. J and K can't be trigger keys.
 - **Variants.** `Story::variant(name, |p| ..)` and `Playground::variant(scene, name, |s| ..)` list
   variants in the side column; 1–9 pick one, which makes the state again on it. A story starts on
   its first variant, and digits it has no variant for reach the stage.

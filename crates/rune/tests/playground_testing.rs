@@ -1,6 +1,6 @@
 //! An app's tests driving its playground headless: open a story, run its triggers and their
 //! `Play::after` steps on the logical clock, and read the stage's state and elements.
-use rune::{App, AppSpec, Cx, El, Env, Playground, Runtime, Story, Tx, col, el, text};
+use rune::{App, AppSpec, Cx, El, Env, Play, Playground, Runtime, Story, Tx, col, el, text};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -158,6 +158,49 @@ fn only_keep_from_a_side_real_control_writes_the_real_state() {
     assert_eq!(rt.state.count, 6, "kept");
     let compare = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("compare")).and_then(|e| e.text);
     assert_eq!(compare.as_deref(), Some("stage 6 real 6"));
+}
+
+#[derive(Default)]
+struct Pulse {
+    beats: u32,
+    settled: bool,
+}
+
+fn pulse_view(p: &Pulse, _: &mut Cx<Pulse>) -> El {
+    text(format!("beats {}", p.beats)).key("pulse")
+}
+
+/// A loop: each beat queues the next.
+fn beat(p: &mut Pulse, play: &mut Play<'_, Pulse>) {
+    p.beats += 1;
+    play.after(0.25, beat);
+}
+
+fn pulse() -> Story<Pulse> {
+    Story::new("Motion/Pulse", Pulse::default, pulse_view)
+        .trigger('r', "Pulse", beat)
+        .trigger('s', "Settle", |_, play| {
+            play.clear();
+            play.after(0.2, |p, _| p.settled = true);
+        })
+}
+
+#[test]
+fn a_trigger_that_clears_stops_the_loop_and_runs_only_its_own_steps() {
+    let mut rt = runtime(playground().story(pulse()));
+    rt.open_playground("Pulse", None);
+    advance(&mut rt, 1.1);
+    let beats = |rt: &Runtime<Pad>| rt.playground_state::<Pulse>().map(|p| (p.beats, p.settled));
+    assert_eq!(beats(&rt), Some((5, false)), "a beat every quarter second from the open");
+    rt.playground_trigger('s');
+    assert_eq!(beats(&rt), Some((5, false)), "clearing leaves the state alone");
+    advance(&mut rt, 0.1);
+    assert_eq!(beats(&rt), Some((5, false)), "the loop's next beat is gone");
+    advance(&mut rt, 0.15);
+    assert_eq!(beats(&rt), Some((5, true)), "the step queued after the clear ran");
+    advance(&mut rt, 1.0);
+    assert_eq!(beats(&rt), Some((5, true)));
+    assert_eq!(rt.playground_element("pulse").and_then(|e| e.text).as_deref(), Some("beats 5"));
 }
 
 #[test]

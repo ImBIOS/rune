@@ -4,4 +4,5 @@
   a trigger as its key does, and `Play::after` steps run as `Runtime::frame` moves the logical
   clock. `Runtime::playground_state::<P>()` reads the stage's state and
   `Runtime::playground_element(key)` finds an element on the stage; `rt.state` stays the real
-  state.
+  state. `Play::clear()` drops the stage's queued steps, a loop's included, so a trigger can
+  take over from a running one.
