@@ -2491,27 +2491,27 @@ impl TextSystem {
                         .find(|&&(ra, rb, _, rw)| rw > 0.0 && ra < s.end && s.start < rb)
                         .map(|&(_, _, c, rw)| (c, rw * scale));
                     let pad = s.bg_pad * scale;
-                    let fm = gr.run().font_metrics();
-                    let (asc, desc) = (fm.ascent, fm.descent);
+                    // Balanced on the cap height (not a mono face's tall line box), on whole device pixels.
+                    let cap = gr.run().font_metrics().cap_height.unwrap_or(gr.run().font_size() * 0.7);
                     let base = origin[1] + m.baseline;
-                    let top = (base - asc - 1.0 * scale).round();
-                    let bot = (base + desc.abs() + 1.0 * scale).round();
-                    let rect = [x0 - pad, top, w + 2.0 * pad, bot - top];
+                    let top = (base - cap * 1.35).round();
+                    let bot = (base + cap * 0.55).round();
+                    let (l, r) = ((x0 - pad).round(), (x0 + w + pad).round());
+                    let rect = [l, top, r - l, bot - top];
                     // Touching runs with the same background and ring on one line (a span split by
                     // style, or inline code and its padding spaces in the body font) share one rect,
                     // as tall as its widest run, so a thin run in another font doesn't poke out as a sliver.
                     let byte = (gr.run().text_range().end as u32).min(s.end).saturating_sub(1);
-                    let previous = if rings.is_empty() { out.len().checked_sub(1) } else { last_bg };
-                    let merge = previous.is_some_and(|i| {
+                    let merge = last_bg.is_some_and(|i: usize| {
                         let (d, old_ring) = out[i].paint();
                         d.color == bg && old_ring == ring
                             && (d.radius - radius).abs() < 1e-3
                             && d.rect[1] < bot
                             && top < d.rect[1] + d.rect[3]
-                            && (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.0
+                            && (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.5
                     });
                     if merge {
-                        let painted = &mut out[previous.unwrap()];
+                        let painted = &mut out[last_bg.unwrap()];
                         let (d, _) = painted.paint();
                         if rect[2] > d.rect[2] {
                             (d.rect[1], d.rect[3]) = (rect[1], rect[3]);
@@ -2523,7 +2523,7 @@ impl TextSystem {
                         out.push(D::new(Deco { rect, color: bg, radius }, ring, byte));
                     }
                 }
-                if let Some(uc) = s.underline {
+                if let Some(uc) = s.underline.filter(|c| c.a > 0.0) {
                     let y = (origin[1] + m.baseline + 2.0 * scale).round();
                     out.push(D::new(Deco { rect: [x0, y, w, scale.max(1.0)], color: uc, radius: 0.0 }, None, 0));
                 }

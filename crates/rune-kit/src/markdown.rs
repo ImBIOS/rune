@@ -392,7 +392,7 @@ impl Builder {
     }
 }
 
-const PAD: &str = "\u{202f}";
+const PAD: &str = "\u{202f}\u{202f}";
 
 /// Source byte range of the inner code text inside a backtick code span `src[range]`.
 fn code_span_content_range(src: &str, range: Range<usize>, rendered: &str) -> Range<usize> {
@@ -1487,21 +1487,21 @@ impl Renderer {
             }
             let in_link = links.iter().find(|l| l.start <= a as u32 && b as u32 <= l.end);
             let mut sp = Span::new(a, b);
+            // Code in a link is a chip in the link's colour, not underlined as well.
+            let no_line = in_link.is_some_and(|l| l.underline.is_some()).then_some(Color::TRANSPARENT);
             match st {
                 Style::Code => {
                     let link_base = in_link.and_then(|l| l.size).unwrap_or(base);
                     sp.mono = true;
                     sp.weight = Some(s.inline_code_weight);
                     sp.size = Some(link_base * s.inline_code_scale);
+                    sp.underline = no_line;
                     if in_link.is_none_or(|l| l.bg.is_none()) {
-                        sp.bg = Some(s.code_bg);
+                        sp = sp.bg(s.code_bg, s.inline_code_pad);
                     }
                 }
-                Style::CodePad => {
-                    if in_link.is_none_or(|l| l.bg.is_none()) {
-                        sp.bg = Some(s.code_bg);
-                    }
-                }
+                Style::CodePad if no_line.is_none() => continue,
+                Style::CodePad => sp.underline = no_line,
                 Style::Strong => sp.weight = Some(s.strong_weight),
                 Style::Em => sp.italic = true,
                 Style::Strike | Style::Link => unreachable!(),
@@ -1589,9 +1589,9 @@ impl Renderer {
             // The text sizes to its longest line inside the viewport, which scrolls under the
             // padding so lines run to the frame's edge.
             return frame.child(col().key("scroll").w_full().scroll_x().scroll_edge_fade(12.0)
-                .child(col().padding(12.0).child(self.select(body))));
+                .child(col().px(s.code_block_pad[0]).py(s.code_block_pad[1]).child(self.select(body))));
         }
-        frame.padding(12.0).child(self.select(body.w_full()))
+        frame.px(s.code_block_pad[0]).py(s.code_block_pad[1]).child(self.select(body.w_full()))
     }
 
     /// Colour-only spans, so highlighting never moves a glyph: a block streaming in draws its
@@ -1611,7 +1611,7 @@ impl Renderer {
     fn diff(&self, src: &str, map: Option<&SpanMap>) -> El {
         let s = &self.s;
         let all_hl = self.text_highlights_for(src, map);
-        let mut c = col().w_full().py(12.0).radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
+        let mut c = col().w_full().py(s.code_block_pad[1]).radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
         let mut line_start = 0usize;
         for (n, line) in src.split('\n').enumerate() {
             let line_end = line_start + line.len();
@@ -1637,7 +1637,7 @@ impl Renderer {
             let mut r = row()
                 .key(format!("l{n}"))
                 .w_full()
-                .px(12.0)
+                .px(s.code_block_pad[0])
                 .child(self.select(tabbed(shown, Vec::new(), line_hl, s.code_block).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
             if let Some(t) = tint {
                 r = r.fill(t);
@@ -1738,7 +1738,7 @@ impl Renderer {
                     BlockMap::List(m) => m.as_slice(),
                     _ => &[][..],
                 };
-                let mut c = col().w_full().gap(4.0);
+                let mut c = col().w_full().gap(s.list_gap);
                 for (k, item) in items.iter().enumerate() {
                     let imap = item_maps.get(k).map_or(&[][..], Vec::as_slice);
                     let task_idx = self.next_task.get();
@@ -1756,7 +1756,7 @@ impl Renderer {
                             .key(format!("i{k}"))
                             .w_full()
                             .child(
-                                text(marker).font(s.body).color(s.muted).w(32.0).align(Align::Center).reveal(self.reveal),
+                                text(marker).font(s.body).color(s.muted).w(s.list_indent).align(Align::Center).reveal(self.reveal),
                             )
                             .child(self.blocks(item, imap, &[], false).grow(1.0).shrink()),
                     );

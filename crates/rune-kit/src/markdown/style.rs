@@ -24,6 +24,10 @@ pub struct MarkdownStyle {
     pub(super) code_block: TextStyle,
     pub(super) inline_code_scale: f32,
     pub(super) inline_code_weight: f32,
+    pub(super) inline_code_pad: f32,
+    pub(super) code_block_pad: [f32; 2],
+    pub(super) list_indent: f32,
+    pub(super) list_gap: f32,
     pub(super) strong_weight: f32,
     pub(super) table_outline: Option<Color>,
     pub(super) table_rule: Color,
@@ -138,6 +142,10 @@ impl MarkdownStyle {
             code_block: TextStyle { size: 13.0, line_height: 20.0, ..k.ty.mono },
             inline_code_scale: 0.9,
             inline_code_weight: 400.0,
+            inline_code_pad: 3.5,
+            code_block_pad: [12.0, 12.0],
+            list_indent: 32.0,
+            list_gap: 4.0,
             strong_weight: 670.0,
             table_outline: Some(c.border_muted),
             table_rule: c.border_muted,
@@ -235,6 +243,18 @@ impl MarkdownStyle {
         self.code_block_border = border;
         self
     }
+    /// Room (x, y) inside a code block's frame; 12 by 12 by default.
+    pub fn code_block_padding(mut self, x: f32, y: f32) -> Self {
+        self.code_block_pad = [x, y];
+        self
+    }
+    /// The column a list's markers sit centred in (32 by default), and the gap between its
+    /// items (4).
+    pub fn list(mut self, indent: f32, gap: f32) -> Self {
+        self.list_indent = indent;
+        self.list_gap = gap;
+        self
+    }
     pub fn quote_rule(mut self, c: Color) -> Self {
         self.quote_rule = c;
         self
@@ -265,6 +285,12 @@ impl MarkdownStyle {
     pub fn inline_code_font(mut self, scale: f32, weight: f32) -> Self {
         self.inline_code_scale = scale;
         self.inline_code_weight = weight;
+        self
+    }
+    /// Room in points between inline code and the edges of its chip. Up to twice a narrow
+    /// space's width; what's left of it is the gap between the chip and the text around it.
+    pub fn inline_code_pad(mut self, pad: f32) -> Self {
+        self.inline_code_pad = pad;
         self
     }
     pub fn strong_weight(mut self, w: f32) -> Self {
