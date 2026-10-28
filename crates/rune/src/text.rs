@@ -33,7 +33,7 @@ mod measure;
 mod svg_path;
 mod trak;
 pub use case::TextCase;
-pub use measure::{TextInk, ink, measure};
+pub use measure::{TextInk, advance, ink, measure};
 pub(crate) use case::Source as CaseSource;
 
 use fallback::Route;

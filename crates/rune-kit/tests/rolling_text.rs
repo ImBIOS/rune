@@ -369,7 +369,7 @@ fn a_trailing_label_rolls_new_digits_in_their_columns() {
         let k = Kit::neutral(true);
         let label = RollingText::new("t", s.0.clone()).value(s.0.trim_end_matches('s').parse().unwrap()).font(k.ty.mono);
         let label = if s.1 { label.trailing() } else { label };
-        rune::row().w(200.0).padding(20.0).justify_end().child(label.build(&k).motion(RollingText::SPRING).width_leads())
+        rune::row().w(200.0).padding(20.0).justify_end().child(label.build(&k))
     }
     let drift = |trailing: bool| {
         let mut rt = Runtime::new(("9s".to_string(), trailing), view, (400.0, 120.0), Env::new(true, 2.0));
@@ -438,4 +438,95 @@ fn a_value_under_reduced_motion_swaps_in_place_and_a_reversal_mid_roll_retargets
     let (rect, target) = glyph(&rt, "8").unwrap();
     assert!(worst < 4.0, "the returning 8 moves smoothly: {worst} pt in a frame");
     assert_eq!(rect, target, "and settles");
+}
+
+fn seconds(s: &(String, bool), _cx: &mut Cx<(String, bool)>) -> El {
+    let k = Kit::neutral(true);
+    let label = RollingText::new("t", s.0.clone()).value(s.0.trim_end_matches('s').parse().unwrap()).font(k.ty.mono);
+    let label = if s.1 { label.trailing() } else { label };
+    rune::row().w(200.0).padding(20.0).justify_end().child(label.build(&k))
+}
+
+/// The drawn rect of the glyph showing `text` under key `t`: leaving (`exiting`) or staying.
+fn cell<S>(rt: &Runtime<S>, text: &str, exiting: bool) -> Option<[f32; 4]> {
+    rt.elements().into_iter().find(|e| e.exiting == exiting && e.text.as_deref() == Some(text) && e.key.as_deref().is_some_and(|k| k.starts_with("t."))).map(|e| e.rect)
+}
+
+/// The leaving glyph's y each frame while it's drawn.
+fn exit_path<S>(rt: &mut Runtime<S>, text: &str) -> Vec<f32> {
+    let mut ys = Vec::new();
+    for _ in 0..90 {
+        rt.frame(1.0 / 120.0);
+        if let Some(r) = cell(rt, text, true) {
+            ys.push(r[1]);
+        }
+    }
+    ys
+}
+
+/// Old glyphs leave the way the new ones enter, decided by the commit that removes them: down on
+/// a first count down, and down again when the value turns back mid-roll.
+#[test]
+fn leaving_glyphs_roll_the_way_this_change_moves() {
+    let mut rt = Runtime::new(("9s".to_string(), false), seconds, (400.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.0 = "8s".into());
+    let ys = exit_path(&mut rt, "9");
+    assert!(ys.len() > 4 && ys.windows(2).all(|w| w[1] >= w[0] - 0.01) && ys[ys.len() - 1] > ys[0] + 2.0, "a first count down rolls the 9 out downward: {ys:?}");
+
+    rt.update(|s, _| s.0 = "9s".into());
+    for _ in 0..8 {
+        rt.frame(1.0 / 120.0);
+    }
+    rt.update(|s, _| s.0 = "8s".into());
+    let ys = exit_path(&mut rt, "9");
+    // It was rising; the spring carries that on for a moment before it turns, under a point.
+    let back = ys[0] - ys.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(ys.len() > 2 && back < 1.0 && ys[ys.len() - 1] > ys[0] + 2.0, "turning back mid-roll, the 9 leaves downward: {ys:?}");
+
+    rt.update(|s, _| s.0 = "9s".into());
+    let ys = exit_path(&mut rt, "8");
+    assert!(ys.len() > 4 && ys.windows(2).all(|w| w[1] <= w[0] + 0.01), "counting up again, the 8 leaves upward: {ys:?}");
+}
+
+/// In a trailing label every glyph holds its column while the edge moves: the leaving ones where
+/// they were drawn, the entering ones where they come to rest. 9s → 10s → 11s, then 19s → 100s.
+#[test]
+fn a_trailing_label_holds_leaving_and_entering_glyphs_in_their_columns() {
+    let run = |from: &str, to: &str, gone: &[&str], came: &[&str]| -> f32 {
+        let mut rt = Runtime::new((from.to_string(), true), seconds, (400.0, 120.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let starts: Vec<f32> = gone.iter().map(|g| cell(&rt, g, false).expect("shown")[0]).collect();
+        rt.update(|s, _| s.0 = to.into());
+        let mut worst = 0.0f32;
+        for _ in 0..90 {
+            rt.frame(1.0 / 120.0);
+            for (g, x0) in gone.iter().zip(&starts) {
+                if let Some(r) = cell(&rt, g, true) {
+                    worst = worst.max((r[0] - x0).abs());
+                }
+            }
+            for c in came {
+                let e = rt.elements().into_iter().find(|e| !e.exiting && e.text.as_deref() == Some(*c) && e.key.as_deref().is_some_and(|k| k.starts_with("t."))).unwrap();
+                worst = worst.max((e.rect[0] - e.target[0]).abs());
+            }
+        }
+        worst
+    };
+    let a = run("9s", "10s", &["9"], &["1"]);
+    assert!(a < 0.75, "9s → 10s: {a} pt off");
+    let mut rt = Runtime::new(("10s".to_string(), true), seconds, (400.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let x0 = cell(&rt, "0", false).expect("the 0")[0];
+    rt.update(|s, _| s.0 = "11s".into());
+    let mut drift = 0.0f32;
+    for _ in 0..90 {
+        rt.frame(1.0 / 120.0);
+        if let Some(r) = cell(&rt, "0", true) {
+            drift = drift.max((r[0] - x0).abs());
+        }
+    }
+    assert!(drift < 0.5, "10s → 11s: the 0 rolls out in its column: {drift} pt");
+    let c = run("19s", "100s", &["1", "9"], &[]);
+    assert!(c < 0.75, "19s → 100s: {c} pt off");
 }

@@ -627,6 +627,8 @@ pub struct Visual {
     pub(crate) rotate: f32,
     /// The curve `El::rotate` changes on.
     pub(crate) rotate_motion: Option<Box<Anim>>,
+    /// `El::child_exit`: how children removed in a commit leave, in place of their own.
+    pub(crate) child_exit: Option<Transition>,
 }
 
 impl Default for Visual {
@@ -678,6 +680,7 @@ impl Default for Visual {
             origin: None,
             rotate: 0.0,
             rotate_motion: None,
+            child_exit: None,
         }
     }
 }

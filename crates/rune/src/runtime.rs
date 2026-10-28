@@ -4399,6 +4399,9 @@ impl<S: 'static> Runtime<S> {
                 if tx.settle || (instant && !self.is_exiting(old.id)) || unseen.get(oi).copied().unwrap_or(false) {
                     self.scene.unmount(old.id);
                 } else {
+                    if let Some(t) = old_parent_id.and_then(|pid| self.node_index.get(&pid)).and_then(|&p| nodes[p].vis.child_exit) {
+                        self.scene.set_transition(old.id, t);
+                    }
                     self.scene.remove(old.id);
                 }
             } else if !tx.settle && self.flying.iter().any(|f| f.0 == old.id) {

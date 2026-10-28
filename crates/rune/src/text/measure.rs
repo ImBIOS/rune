@@ -56,6 +56,12 @@ pub fn measure(text: &str, spans: &[Span], style: TextStyle, max_width: Option<f
     })
 }
 
+/// The advance in points of `text` set on one line in `style`, unrounded: how much wider a row
+/// of [`El::advance_in`](crate::El::advance_in) cells gets for it, to within a device pixel.
+pub fn advance(text: &str, style: TextStyle) -> f32 {
+    with_text(|t| t.layout_rich(text, &[], style, 1.0, None).full_width())
+}
+
 /// Runs `f` on this thread's text system, built from the fonts the app was given.
 pub(super) fn with_text<R>(f: impl FnOnce(&mut TextSystem) -> R) -> R {
     let generation = || FONTS.lock().ok().and_then(|f| f.as_ref().map(|f| f.generation)).unwrap_or(0);

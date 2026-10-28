@@ -116,16 +116,25 @@ impl RollingText {
     pub fn build(self, k: &Kit) -> El {
         let font = self.font.unwrap_or(k.ty.ui);
         let color = self.color.unwrap_or(k.c.text_base);
-        let width = rune::text::measure(&self.text, &[], font, None).0;
-        let (glyphs, falling, was) = keys(&self.key, &self.text, self.value, width);
+        let width = if self.trailing { rune::text::advance(&self.text, font) } else { 0.0 };
+        let (glyphs, falling, was) = keys(&self.key, &self.text, self.value, width, self.trailing);
         let from = if falling { self.from.opposite() } else { self.from };
         let edge = (font.line_px() * 0.12).max(1.0);
+        // How far a trailing label's leading edge moves left as it widens (negative as it narrows).
+        let grow = was.map(|w| width - w).filter(|d| self.trailing && d.abs() > 0.01).unwrap_or(0.0);
+        // Glyphs leave the way this build rolls, whichever way they last did. A trailing label's
+        // leaving glyph stays where it was drawn while its row's edge moves under it, and an
+        // entering one starts where it will rest; both cancel the row's slide on its own spring.
+        let push = Transition::push(from);
+        let exit = push.combined(Transition::offset(grow, 0.0)).springs(SpringPair::new(self.spring, self.spring));
         // The fades sit in padding that negative margins take back out of layout, so the resting
         // glyphs (descenders included) are never faded but rolling glyphs and a growing or
-        // shrinking edge stay soft. Glyphs slide on the row's own width-leading X spring, so in a
-        // label whose trailing edge holds still (right-aligned) the glyphs that stay hold still.
+        // shrinking edge stay soft. Glyphs slide on the row's own X spring: width-leading, or for
+        // a trailing label the plain spring its entering glyphs roll on, so the glyphs that stay
+        // hold still against the edge that doesn't move.
         let side = (font.size * 0.3).max(2.0);
-        let mut e = row()
+        let lead = |e: El| if self.trailing { e } else { e.width_leads() };
+        let mut e = lead(row()
             .key(self.key.clone())
             .role("text")
             .label(self.text.clone())
@@ -136,9 +145,9 @@ impl RollingText {
             .mr(-side)
             .mt(-edge)
             .mb(-edge)
-            .motion(self.spring)
-            .width_leads()
-            .clip_fade(side, edge, side, edge);
+            .motion(self.spring))
+            .clip_fade(side, edge, side, edge)
+            .child_exit(exit);
         // Every cell measures as its slice of the whole label shaped once, so the row keeps the
         // run's kerned, fractional advances and the width of the same string set as one text.
         let run = Run::new(self.text.as_str());
@@ -152,29 +161,19 @@ impl RollingText {
                 self.spring
             };
             let tr = if g.entered {
-                let push = Transition::push(from);
-                match was.map(|w| width - w).filter(|d| self.trailing && d.abs() > 0.01) {
-                    // The label's left edge slides by its change in width, on its X spring; a new
-                    // glyph starts that far the other way, on the same spring, so on screen it
-                    // only rolls.
-                    Some(grow) => push
-                        .combined(Transition::offset(-grow, 0.0))
-                        .springs(SpringPair::new(Spring::new(self.spring.duration * rune_motion::WIDTH_LEAD, self.spring.bounce), push.springs.exit)),
-                    None => push,
-                }
+                Transition::asymmetric(push.combined(Transition::offset(-grow, 0.0)), push).springs(SpringPair::new(spring, self.spring))
             } else {
-                Transition::asymmetric(Transition::identity(), Transition::push(from))
+                Transition::asymmetric(Transition::identity(), push)
             };
-            e = e.child(
+            e = e.child(lead(
                 text(g.cluster)
                     .key(format!("{}.{}", self.key, g.id))
                     .font(font)
                     .advance_in(&run, at)
                     .color(color)
-                    .motion(spring)
-                    .width_leads()
-                    .transition(tr),
-            );
+                    .motion(spring),
+            )
+            .transition(tr));
         }
         e
     }
@@ -190,13 +189,13 @@ struct Glyph {
 /// Assigns each cluster of `text` a stable id: clusters matched to the previous text under `key`
 /// keep theirs, the rest get fresh ones. Also whether `value` fell below the last finite value
 /// one, and the label's last `width`.
-fn keys(key: &str, text: &str, value: Option<f64>, width: f32) -> (Vec<Glyph>, bool, Option<f32>) {
+fn keys(key: &str, text: &str, value: Option<f64>, width: f32, trailing: bool) -> (Vec<Glyph>, bool, Option<f32>) {
     MEMORY.with(|m| {
         let mut m = m.borrow_mut();
         let mem = m.entry(key.to_owned()).or_default();
         let new: Vec<&str> = text.graphemes(true).collect();
         let old: Vec<&str> = mem.clusters.iter().map(|(c, _)| c.as_str()).collect();
-        let matched = diff(&old, &new);
+        let matched = diff(&old, &new, trailing);
         let fresh = mem.clusters.is_empty() && mem.next == 0;
         let mut glyphs = Vec::with_capacity(new.len());
         for (c, from) in new.iter().zip(matched) {
@@ -224,25 +223,42 @@ fn keys(key: &str, text: &str, value: Option<f64>, width: f32) -> (Vec<Glyph>, b
 /// survive in runs of two or more, or alone when they hold their place (the ":" of "1:00" →
 /// "0:59"); a lone letter that would slide among rolling neighbours rolls too, so "Copy password"
 /// → "Copied, clears in" doesn't leave a stray "r" or "s" gliding across the label.
-pub(crate) fn diff(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
+///
+/// A `trailing` label holds still at its right edge, so it matches like an odometer, from the
+/// right: the suffix first, a prefix only of non-digits (a "$" slides left with the number, a
+/// digit that changes column rolls), and a place counted from the end. "10s" → "100s" keeps
+/// "0s" and rolls a new "1" and "0" in; "19s" → "100s" keeps only the "s".
+pub(crate) fn diff(old: &[&str], new: &[&str], trailing: bool) -> Vec<Option<usize>> {
     let mut out = vec![None; new.len()];
     let n = old.len().min(new.len());
+    let digit = |c: &str| c.bytes().all(|b| b.is_ascii_digit());
+    let mut suf = 0;
+    let suffix = |out: &mut Vec<Option<usize>>, pre: usize, suf: &mut usize| {
+        while *suf < n - pre && old[old.len() - 1 - *suf] == new[new.len() - 1 - *suf] {
+            out[new.len() - 1 - *suf] = Some(old.len() - 1 - *suf);
+            *suf += 1;
+        }
+    };
+    if trailing {
+        suffix(&mut out, 0, &mut suf);
+    }
     let mut pre = 0;
-    while pre < n && old[pre] == new[pre] {
+    while pre < n - suf && old[pre] == new[pre] && !(trailing && digit(new[pre])) {
         out[pre] = Some(pre);
         pre += 1;
     }
-    let mut suf = 0;
-    while suf < n - pre && old[old.len() - 1 - suf] == new[new.len() - 1 - suf] {
-        out[new.len() - 1 - suf] = Some(old.len() - 1 - suf);
-        suf += 1;
+    if !trailing {
+        suffix(&mut out, pre, &mut suf);
     }
     let (a, b) = (&old[pre..old.len() - suf], &new[pre..new.len() - suf]);
     if a.is_empty() || b.is_empty() || a.len() * b.len() > LCS_BUDGET {
         return out;
     }
     // How far a match slides, in glyphs, measured from whichever end it sits closer to.
-    let shift = |i: usize, j: usize| i.abs_diff(j).min((a.len() - i).abs_diff(b.len() - j));
+    let shift = |i: usize, j: usize| {
+        let end = (a.len() - i).abs_diff(b.len() - j);
+        if trailing { end } else { i.abs_diff(j).min(end) }
+    };
     // A weighted LCS (suffix table): each match scores more the less it slides, so among
     // equally long subsequences the one that stays in place wins ("1:00" → "0:59" keeps ":").
     let weight = |i: usize, j: usize| 8 - shift(i, j).min(7) as u32;
@@ -282,7 +298,22 @@ mod tests {
 
     fn kept(old: &str, new: &str) -> String {
         let (o, n): (Vec<&str>, Vec<&str>) = (old.graphemes(true).collect(), new.graphemes(true).collect());
-        diff(&o, &n).iter().zip(&n).map(|(m, c)| if m.is_some() { *c } else { "_" }).collect()
+        diff(&o, &n, false).iter().zip(&n).map(|(m, c)| if m.is_some() { *c } else { "_" }).collect()
+    }
+
+    fn kept_end(old: &str, new: &str) -> String {
+        let (o, n): (Vec<&str>, Vec<&str>) = (old.graphemes(true).collect(), new.graphemes(true).collect());
+        diff(&o, &n, true).iter().zip(&n).map(|(m, c)| if m.is_some() { *c } else { "_" }).collect()
+    }
+
+    #[test]
+    fn a_trailing_label_matches_from_the_right_like_an_odometer() {
+        assert_eq!(kept_end("10s", "100s"), "__0s");
+        assert_eq!(kept_end("19s", "100s"), "___s");
+        assert_eq!(kept_end("9s", "10s"), "__s");
+        assert_eq!(kept_end("$1.98", "$1.99"), "$1.9_");
+        assert_eq!(kept_end("$9.99", "$10.00"), "$__.__");
+        assert_eq!(kept_end("59s", "1m 00s"), "_____s");
     }
 
     #[test]
@@ -311,10 +342,10 @@ mod tests {
 
     #[test]
     fn rebuilding_the_same_text_keeps_every_key() {
-        let a: Vec<u64> = keys("same", "0:30", None, 0.0).0.iter().map(|g| g.id).collect();
-        let b: Vec<u64> = keys("same", "0:30", None, 0.0).0.iter().map(|g| g.id).collect();
+        let a: Vec<u64> = keys("same", "0:30", None, 0.0, false).0.iter().map(|g| g.id).collect();
+        let b: Vec<u64> = keys("same", "0:30", None, 0.0, false).0.iter().map(|g| g.id).collect();
         assert_eq!(a, b);
-        let c = keys("same", "0:29", None, 0.0).0;
+        let c = keys("same", "0:29", None, 0.0, false).0;
         assert_eq!((c[0].id, c[1].id), (a[0], a[1]));
         assert!(c[2].entered && c[3].entered && !c[0].entered);
         assert!(c[2].id > a[3] && c[3].id > a[3], "new glyphs never reuse an exiting key");
@@ -322,7 +353,7 @@ mod tests {
 
     #[test]
     fn a_value_rolls_the_way_it_moves() {
-        let falls = |text: &str, v: Option<f64>| keys("dir", text, v, 0.0).1;
+        let falls = |text: &str, v: Option<f64>| keys("dir", text, v, 0.0, false).1;
         assert!(!falls("9s", Some(9.0)), "the first build rolls nowhere, as counting up");
         assert!(!falls("10s", Some(10.0)), "rising");
         assert!(falls("8s", Some(8.0)), "falling");
